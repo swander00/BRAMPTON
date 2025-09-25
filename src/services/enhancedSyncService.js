@@ -26,8 +26,8 @@ class EnhancedSyncService {
         batchSize: 5000, // Increased to 5000 as requested
         endpoint: 'Media',
         keyField: 'MediaKey',
-        timestampField: 'ModificationTimestamp',
-        filter: null,
+        timestampField: 'MediaModificationTimestamp', // Use correct timestamp field for media
+        filter: 'MediaModificationTimestamp ge 2025-01-01T00:00:00Z', // Only get media from 2025
         dbBatchSize: 100 // Database operations in smaller chunks
       }
     };
@@ -399,12 +399,74 @@ class EnhancedSyncService {
       return results;
     }
 
+    // Filter media records to only include those with existing properties
+    console.log(`🔍 Filtering media records with existing properties...`);
+    const validMedia = [];
+    const invalidMedia = [];
+    
+    // Get unique ResourceRecordKeys from the mapped media
+    const resourceKeys = [...new Set(mappedMedia.map(m => m.ResourceRecordKey))];
+    
+    try {
+      // Check which properties exist in the database
+      const existingProperties = await this.database.client
+        .from('Property')
+        .select('ListingKey')
+        .in('ListingKey', resourceKeys);
+      
+      if (existingProperties.error) {
+        throw new Error(`Failed to check existing properties: ${existingProperties.error.message}`);
+      }
+      
+      const existingKeys = new Set(existingProperties.data.map(p => p.ListingKey));
+      
+      // Filter media based on existing properties
+      for (const media of mappedMedia) {
+        if (existingKeys.has(media.ResourceRecordKey)) {
+          validMedia.push(media);
+        } else {
+          invalidMedia.push(media);
+          results.failed++;
+          results.errors.push({
+            MediaKey: media.MediaKey,
+            ResourceRecordKey: media.ResourceRecordKey,
+            error: 'Referenced property does not exist in database',
+            stage: 'validation'
+          });
+        }
+      }
+      
+      console.log(`✅ Valid media records: ${validMedia.length}/${mappedMedia.length} (${invalidMedia.length} filtered out)`);
+      
+      if (invalidMedia.length > 0) {
+        logger.info('Filtered out media records with non-existent properties', {
+          batchNumber,
+          validCount: validMedia.length,
+          invalidCount: invalidMedia.length,
+          sampleInvalidKeys: invalidMedia.slice(0, 3).map(m => m.ResourceRecordKey)
+        });
+      }
+      
+    } catch (filterError) {
+      logger.error('Failed to filter media records', {
+        batchNumber,
+        error: filterError.message
+      });
+      // If filtering fails, proceed with all mapped media (will likely fail at database level)
+      validMedia.push(...mappedMedia);
+    }
+
+    if (validMedia.length === 0) {
+      console.log(`⚠️  No valid media records to insert for batch ${batchNumber}`);
+      return results;
+    }
+
     // Upsert to database in smaller batches
     try {
       console.log(`💾 Upserting to database in batches of ${this.config.media.dbBatchSize}...`);
       
       const dbResult = await this.database.upsertMediaBatch(
-        mappedMedia, 
+        validMedia, 
         this.config.media.dbBatchSize
       );
 
@@ -415,14 +477,14 @@ class EnhancedSyncService {
         results.errors.push(...dbResult.errors);
       }
 
-      console.log(`💾 Database upsert: ${dbResult.successful}/${mappedMedia.length} successful`);
+      console.log(`💾 Database upsert: ${dbResult.successful}/${validMedia.length} successful`);
 
     } catch (dbError) {
       logger.error('Database upsert failed for media batch', {
         batchNumber,
         error: dbError.message
       });
-      results.failed += mappedMedia.length;
+      results.failed += validMedia.length;
       results.errors.push({
         batch: batchNumber,
         error: dbError.message,

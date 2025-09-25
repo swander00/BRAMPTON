@@ -70,24 +70,19 @@ class AmpreApiService {
    */
   async getCount(endpoint, filter = '', feedType = 'default') {
     try {
-      const url = new URL(`/odata/${endpoint}`, this.baseUrl);
-      
-      // Add query parameters
-      const params = new URLSearchParams({
-        '$top': '0',
-        '$count': 'true'
-      });
+      // Manually construct URL to avoid URLSearchParams encoding issues
+      let urlString = `${this.baseUrl}/odata/${endpoint}?$top=0&$count=true`;
       
       if (filter) {
-        params.append('$filter', filter);
+        // Encode spaces as %20 (not +) for OData compatibility
+        const encodedFilter = filter.replace(/ /g, '%20');
+        urlString += `&$filter=${encodedFilter}`;
       }
       
-      url.search = params.toString();
-      
-      logger.debug('Fetching count', { url: url.toString(), feedType });
+      logger.debug('Fetching count', { url: urlString, feedType });
       
       const headers = this.getHeaders(feedType);
-      const response = await fetch(url.toString(), { headers });
+      const response = await fetch(urlString, { headers });
       
       if (!response.ok) {
         let errorBody = '';
@@ -139,41 +134,38 @@ class AmpreApiService {
     } = options;
     
     try {
-
-      const url = new URL(`/odata/${endpoint}`, this.baseUrl);
-      
-      // Add query parameters
-      const params = new URLSearchParams({
-        '$top': top.toString()
-      });
+      // Manually construct URL to avoid URLSearchParams encoding issues
+      let urlString = `${this.baseUrl}/odata/${endpoint}?$top=${top}`;
       
       if (skip > 0) {
-        params.append('$skip', skip.toString());
+        urlString += `&$skip=${skip}`;
       }
       
       if (filter) {
-        params.append('$filter', filter);
+        // Encode spaces as %20 (not +) for OData compatibility
+        const encodedFilter = filter.replace(/ /g, '%20');
+        urlString += `&$filter=${encodedFilter}`;
       }
       
       if (orderBy) {
-        params.append('$orderby', orderBy);
+        // Encode spaces as %20 for orderBy as well
+        const encodedOrderBy = orderBy.replace(/ /g, '%20');
+        urlString += `&$orderby=${encodedOrderBy}`;
       }
       
       if (select) {
-        params.append('$select', select);
+        urlString += `&$select=${select}`;
       }
-      
-      url.search = params.toString();
       
       logger.debug('Fetching batch', { 
         endpoint, 
-        url: url.toString(),
+        url: urlString,
         options,
         feedType
       });
       
       const headers = this.getHeaders(feedType);
-      const response = await fetch(url.toString(), { headers });
+      const response = await fetch(urlString, { headers });
       
       if (!response.ok) {
         let errorBody = '';

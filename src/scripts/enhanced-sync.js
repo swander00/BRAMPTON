@@ -84,7 +84,8 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Run if called directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+const normalizedArgv = process.argv[1].replace(/\\/g, '/');
+if (import.meta.url === `file:///${normalizedArgv}`) {
   const script = new EnhancedSyncScript();
   script.run()
     .then(() => {
