@@ -26,22 +26,22 @@ The Enhanced Sync Service provides improved error handling, 5000-record batching
 
 ### Full Sync (Properties + Media)
 ```bash
-node src/scripts/enhanced-sync.js
+node src/scripts/sync.js
 ```
 
 ### Properties Only
 ```bash
-node src/scripts/enhanced-sync.js --properties-only
+node src/scripts/sync.js --properties-only
 ```
 
 ### Media Only
 ```bash
-node src/scripts/enhanced-sync.js --media-only
+node src/scripts/sync.js --media-only
 ```
 
 ### Single Property Sync
 ```bash
-node src/scripts/enhanced-sync.js --single X12172823
+node src/scripts/sync.js --single X12172823
 ```
 
 ## Error Analysis
@@ -110,7 +110,7 @@ Your tokens in `src/config/credentials.js`:
 
 Test API connectivity:
 ```bash
-node src/scripts/enhanced-sync.js --single X12172823
+node src/scripts/sync.js --single X12172823
 ```
 
 Check specific error details in logs:

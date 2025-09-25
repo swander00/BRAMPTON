@@ -34,7 +34,7 @@ function toArray(value) {
   return stringValue ? [stringValue] : null;
 }
 
-function mapProperty(rawProperty, roomsData = null) {
+function mapProperty(rawProperty) {
   try {
     // Map RESO fields to our database schema
     // Using exact field names from provided schema
@@ -125,15 +125,8 @@ function mapProperty(rawProperty, roomsData = null) {
       ParkingSpaces: rawProperty.ParkingSpaces ? Math.floor(parseFloat(rawProperty.ParkingSpaces)) : null,
       ParkingTotal: rawProperty.ParkingTotal ? Math.floor(parseFloat(rawProperty.ParkingTotal)) : null,
       
-      // Open house fields
-      OpenHouseDate: rawProperty.OpenHouseDate,
-      OpenHouseStartTime: rawProperty.OpenHouseStartTime,
-      OpenHouseEndTime: rawProperty.OpenHouseEndTime,
-      OpenHouseStatus: rawProperty.OpenHouseStatus,
-      OpenHouseDateTime: rawProperty.OpenHouseDateTime,
-      
-      // Room details - prioritize data from PropertyRooms endpoint if available
-      ...mapRoomData(rawProperty, roomsData),
+      // Note: OpenHouse and Room data are now handled by separate mappers
+      // and stored in dedicated tables (OpenHouse and PropertyRooms)
       
       // Association fields
       AssociationAmenities: toArray(rawProperty.AssociationAmenities), // TEXT[]
@@ -167,62 +160,6 @@ function mapProperty(rawProperty, roomsData = null) {
   }
 }
 
-/**
- * Map room data from PropertyRooms endpoint or fallback to property data
- * @param {Object} rawProperty - Raw property data
- * @param {Array} roomsData - Array of room objects from PropertyRooms endpoint
- * @returns {Object} Mapped room fields
- */
-function mapRoomData(rawProperty, roomsData) {
-  // If we have room data from PropertyRooms endpoint, use it
-  if (roomsData && Array.isArray(roomsData) && roomsData.length > 0) {
-    // Sort rooms by Order to get consistent primary room selection
-    const sortedRooms = [...roomsData].sort((a, b) => (a.Order || 0) - (b.Order || 0));
-    const primaryRoom = sortedRooms[0];
-    
-    // Collect all unique room features from all rooms
-    const allFeatures = new Set();
-    roomsData.forEach(room => {
-      if (room.RoomFeature1) allFeatures.add(room.RoomFeature1);
-      if (room.RoomFeature2) allFeatures.add(room.RoomFeature2);
-      if (room.RoomFeature3) allFeatures.add(room.RoomFeature3);
-      if (room.RoomFeatures && Array.isArray(room.RoomFeatures)) {
-        room.RoomFeatures.forEach(feature => allFeatures.add(feature));
-      }
-    });
-
-    const featuresArray = Array.from(allFeatures).filter(f => f && f.trim() !== '');
-    
-    return {
-      RoomKey: toArray(primaryRoom.RoomKey), // Handle as array since database expects it
-      RoomDescription: primaryRoom.RoomDescription || null,
-      RoomLength: primaryRoom.RoomLength || null,
-      RoomWidth: primaryRoom.RoomWidth || null,
-      RoomLengthWidthUnits: primaryRoom.RoomLengthWidthUnits || null,
-      RoomLevel: primaryRoom.RoomLevel || null,
-      RoomType: primaryRoom.RoomType || null,
-      RoomFeature1: primaryRoom.RoomFeature1 || null,
-      RoomFeature2: primaryRoom.RoomFeature2 || null,
-      RoomFeature3: primaryRoom.RoomFeature3 || null,
-      RoomFeatures: toArray(featuresArray.length > 0 ? featuresArray : null)
-    };
-  }
-  
-  // Fallback to original property data if no PropertyRooms data available
-  return {
-    RoomKey: toArray(rawProperty.RoomKey), // Handle as array since database expects it
-    RoomDescription: rawProperty.RoomDescription,
-    RoomLength: rawProperty.RoomLength,
-    RoomWidth: rawProperty.RoomWidth,
-    RoomLengthWidthUnits: rawProperty.RoomLengthWidthUnits,
-    RoomFeature1: rawProperty.RoomFeature1,
-    RoomFeature2: rawProperty.RoomFeature2,
-    RoomFeature3: rawProperty.RoomFeature3,
-    RoomFeatures: toArray(rawProperty.RoomFeatures), // TEXT[]
-    RoomLevel: rawProperty.RoomLevel,
-    RoomType: rawProperty.RoomType
-  };
-}
 
 function validateProperty(property) {
   const requiredFields = ['ListingKey'];

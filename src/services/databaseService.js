@@ -9,6 +9,144 @@ class DatabaseService {
     if (!supabaseAdmin) {
       logger.warn('Using regular Supabase client instead of admin client - some operations may be restricted');
     }
+
+    // Circuit breaker configuration for database operations
+    this.circuitBreaker = {
+      failureThreshold: 5, // Number of failures before opening circuit
+      recoveryTimeout: 60000, // 1 minute recovery time
+      halfOpenMaxCalls: 3, // Max calls in half-open state
+      state: 'CLOSED', // CLOSED, OPEN, HALF_OPEN
+      failureCount: 0,
+      lastFailureTime: null,
+      nextAttemptTime: null
+    };
+
+    // Retry configuration for database operations
+    this.retryConfig = {
+      maxRetries: 3,
+      baseDelay: 2000, // 2 seconds
+      maxDelay: 30000, // 30 seconds
+      backoffMultiplier: 2
+    };
+  }
+
+  /**
+   * Check circuit breaker state and handle state transitions
+   * @returns {boolean} True if operation should proceed
+   */
+  checkCircuitBreaker() {
+    const now = Date.now();
+    
+    switch (this.circuitBreaker.state) {
+      case 'CLOSED':
+        return true;
+        
+      case 'OPEN':
+        if (now >= this.circuitBreaker.nextAttemptTime) {
+          this.circuitBreaker.state = 'HALF_OPEN';
+          this.circuitBreaker.halfOpenCalls = 0;
+          logger.info('Circuit breaker transitioning to HALF_OPEN state');
+          return true;
+        }
+        return false;
+        
+      case 'HALF_OPEN':
+        if (this.circuitBreaker.halfOpenCalls >= this.circuitBreaker.halfOpenMaxCalls) {
+          return false;
+        }
+        this.circuitBreaker.halfOpenCalls = (this.circuitBreaker.halfOpenCalls || 0) + 1;
+        return true;
+        
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Record a successful operation for circuit breaker
+   */
+  recordSuccess() {
+    this.circuitBreaker.failureCount = 0;
+    this.circuitBreaker.state = 'CLOSED';
+    this.circuitBreaker.halfOpenCalls = 0;
+  }
+
+  /**
+   * Record a failed operation for circuit breaker
+   */
+  recordFailure() {
+    this.circuitBreaker.failureCount++;
+    this.circuitBreaker.lastFailureTime = Date.now();
+    
+    if (this.circuitBreaker.failureCount >= this.circuitBreaker.failureThreshold) {
+      this.circuitBreaker.state = 'OPEN';
+      this.circuitBreaker.nextAttemptTime = Date.now() + this.circuitBreaker.recoveryTimeout;
+      logger.warn(`Circuit breaker opened due to ${this.circuitBreaker.failureCount} failures`);
+    }
+  }
+
+  /**
+   * Sleep utility function
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise<void>}
+   */
+  async sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Execute a database operation with circuit breaker and retry logic
+   * @param {Function} operation - Database operation to execute
+   * @param {string} operationName - Name of operation for logging
+   * @returns {Promise<any>} Operation result
+   */
+  async executeWithRetry(operation, operationName = 'database operation') {
+    // Check circuit breaker
+    if (!this.checkCircuitBreaker()) {
+      const waitTime = this.circuitBreaker.nextAttemptTime - Date.now();
+      throw new Error(`Circuit breaker is OPEN. Next attempt in ${Math.ceil(waitTime / 1000)} seconds`);
+    }
+
+    let lastError;
+    for (let attempt = 1; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        logger.debug(`${operationName} - Attempt ${attempt}/${this.retryConfig.maxRetries}`);
+        
+        const result = await operation();
+        
+        if (attempt > 1) {
+          logger.info(`${operationName} succeeded on attempt ${attempt}`);
+        }
+        
+        this.recordSuccess();
+        return result;
+
+      } catch (error) {
+        logger.warn(`${operationName} - Attempt ${attempt} failed`, { error: error.message });
+        lastError = error;
+
+        // Check if it's a Cloudflare blocking error
+        if (error.message && (error.message.includes('Cloudflare') || error.message.includes('blocked'))) {
+          logger.warn(`${operationName} - Cloudflare blocking detected`);
+          this.recordFailure();
+        }
+
+        // Calculate delay for next attempt
+        if (attempt < this.retryConfig.maxRetries) {
+          const delay = Math.min(
+            this.retryConfig.baseDelay * Math.pow(this.retryConfig.backoffMultiplier, attempt - 1),
+            this.retryConfig.maxDelay
+          );
+          
+          logger.info(`${operationName} - Waiting ${delay}ms before retry`);
+          await this.sleep(delay);
+        }
+      }
+    }
+
+    this.recordFailure();
+    logger.error(`${operationName} failed after ${this.retryConfig.maxRetries} attempts`);
+    throw lastError;
   }
 
   /**
@@ -17,7 +155,7 @@ class DatabaseService {
    * @returns {Promise<Object>} Result of upsert operation
    */
   async upsertProperty(propertyData) {
-    try {
+    return await this.executeWithRetry(async () => {
       const { data, error } = await this.client
         .from('Property')
         .upsert(propertyData, {
@@ -39,14 +177,7 @@ class DatabaseService {
       });
 
       return { success: true, data };
-
-    } catch (error) {
-      logger.error('Database error upserting property', {
-        ListingKey: propertyData?.ListingKey,
-        error: error.message
-      });
-      throw error;
-    }
+    }, `Upsert property ${propertyData.ListingKey}`);
   }
 
   /**
@@ -71,27 +202,24 @@ class DatabaseService {
         const batch = propertiesData.slice(i, i + batchSize);
         
         try {
-          const { data, error } = await this.client
-            .from('Property')
-            .upsert(batch, {
-              onConflict: 'ListingKey',
-              ignoreDuplicates: false
-            })
-            .select('ListingKey');
+          const result = await this.executeWithRetry(async () => {
+            const { data, error } = await this.client
+              .from('Property')
+              .upsert(batch, {
+                onConflict: 'ListingKey',
+                ignoreDuplicates: false
+              })
+              .select('ListingKey');
 
-          if (error) {
-            logger.error(`Error upserting property batch ${i}-${i + batch.length}`, {
-              error: error.message
-            });
-            results.failed += batch.length;
-            results.errors.push({
-              batch: `${i}-${i + batch.length}`,
-              error: error.message
-            });
-          } else {
-            results.successful += data.length;
-            logger.info(`Batch ${i}-${i + batch.length} upserted successfully`);
-          }
+            if (error) {
+              throw error;
+            }
+
+            return data;
+          }, `Upsert property batch ${i}-${i + batch.length}`);
+
+          results.successful += result.length;
+          logger.info(`Batch ${i}-${i + batch.length} upserted successfully`);
 
         } catch (batchError) {
           logger.error(`Database error in property batch ${i}-${i + batch.length}`, {
@@ -115,12 +243,55 @@ class DatabaseService {
   }
 
   /**
-   * Upsert a single media record
+   * Validate that a property exists before upserting media
+   * @param {string} resourceRecordKey - Property ListingKey to validate
+   * @returns {Promise<boolean>} True if property exists
+   */
+  async validatePropertyExists(resourceRecordKey) {
+    try {
+      const { data, error } = await this.client
+        .from('Property')
+        .select('ListingKey')
+        .eq('ListingKey', resourceRecordKey)
+        .single();
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 is "not found"
+        logger.error('Error validating property existence', {
+          ResourceRecordKey: resourceRecordKey,
+          error: error.message
+        });
+        throw error;
+      }
+
+      return !!data;
+    } catch (error) {
+      logger.error('Database error validating property existence', {
+        ResourceRecordKey: resourceRecordKey,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Upsert a single media record with property validation
    * @param {Object} mediaData - Mapped media data
    * @returns {Promise<Object>} Result of upsert operation
    */
   async upsertMedia(mediaData) {
     try {
+      // Validate that the referenced property exists
+      const propertyExists = await this.validatePropertyExists(mediaData.ResourceRecordKey);
+      
+      if (!propertyExists) {
+        const error = new Error(`Property with ListingKey '${mediaData.ResourceRecordKey}' does not exist`);
+        logger.error('Cannot upsert media - referenced property does not exist', {
+          MediaKey: mediaData.MediaKey,
+          ResourceRecordKey: mediaData.ResourceRecordKey
+        });
+        throw error;
+      }
+
       const { data, error } = await this.client
         .from('Media')
         .upsert(mediaData, {
@@ -156,7 +327,7 @@ class DatabaseService {
   }
 
   /**
-   * Upsert multiple media records
+   * Upsert multiple media records with property validation
    * @param {Array} mediaData - Array of mapped media data
    * @param {number} batchSize - Size of batches for processing
    * @returns {Promise<Object>} Result summary
@@ -177,6 +348,10 @@ class DatabaseService {
         const batch = mediaData.slice(i, i + batchSize);
         
         try {
+          // Note: The batch validation is already done at the EnhancedSyncService level
+          // This method assumes all media records in the batch have been pre-validated
+          // to ensure their ResourceRecordKey exists in the Property table
+          
           const { data, error } = await this.client
             .from('Media')
             .upsert(batch, {
@@ -225,6 +400,218 @@ class DatabaseService {
    */
   async upsertMediaBatch(mediaData, batchSize = 100) {
     return this.upsertMediaBulk(mediaData, batchSize);
+  }
+
+  /**
+   * Upsert a single room record
+   * @param {Object} roomData - Mapped room data
+   * @returns {Promise<Object>} Result of upsert operation
+   */
+  async upsertRoom(roomData) {
+    try {
+      const { data, error } = await this.client
+        .from('PropertyRooms')
+        .upsert(roomData, {
+          onConflict: 'RoomKey',
+          ignoreDuplicates: false
+        })
+        .select();
+
+      if (error) {
+        logger.error('Error upserting room', {
+          RoomKey: roomData.RoomKey,
+          ListingKey: roomData.ListingKey,
+          error: error.message
+        });
+        throw error;
+      }
+
+      logger.debug('Room upserted successfully', {
+        RoomKey: roomData.RoomKey,
+        ListingKey: roomData.ListingKey
+      });
+
+      return { success: true, data };
+
+    } catch (error) {
+      logger.error('Database error upserting room', {
+        RoomKey: roomData?.RoomKey,
+        ListingKey: roomData?.ListingKey,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Upsert multiple room records
+   * @param {Array} roomsData - Array of mapped room data
+   * @param {number} batchSize - Size of batches for processing
+   * @returns {Promise<Object>} Result summary
+   */
+  async upsertRooms(roomsData, batchSize = 100) {
+    try {
+      logger.info(`Starting bulk upsert of ${roomsData.length} rooms`);
+      
+      const results = {
+        total: roomsData.length,
+        successful: 0,
+        failed: 0,
+        errors: []
+      };
+
+      // Process in batches
+      for (let i = 0; i < roomsData.length; i += batchSize) {
+        const batch = roomsData.slice(i, i + batchSize);
+        
+        try {
+          const { data, error } = await this.client
+            .from('PropertyRooms')
+            .upsert(batch, {
+              onConflict: 'RoomKey',
+              ignoreDuplicates: false
+            })
+            .select('RoomKey');
+
+          if (error) {
+            logger.error(`Error upserting rooms batch ${i}-${i + batch.length}`, {
+              error: error.message
+            });
+            results.failed += batch.length;
+            results.errors.push({
+              batch: `${i}-${i + batch.length}`,
+              error: error.message
+            });
+          } else {
+            results.successful += data.length;
+            logger.info(`Rooms batch ${i}-${i + batch.length} upserted successfully`);
+          }
+
+        } catch (batchError) {
+          logger.error(`Database error in rooms batch ${i}-${i + batch.length}`, {
+            error: batchError.message
+          });
+          results.failed += batch.length;
+          results.errors.push({
+            batch: `${i}-${i + batch.length}`,
+            error: batchError.message
+          });
+        }
+      }
+
+      logger.info('Bulk rooms upsert completed', results);
+      return results;
+
+    } catch (error) {
+      logger.error('Error in bulk rooms upsert', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Upsert a single open house record
+   * @param {Object} openHouseData - Mapped open house data
+   * @returns {Promise<Object>} Result of upsert operation
+   */
+  async upsertOpenHouse(openHouseData) {
+    try {
+      const { data, error } = await this.client
+        .from('OpenHouse')
+        .upsert(openHouseData, {
+          onConflict: 'OpenHouseKey',
+          ignoreDuplicates: false
+        })
+        .select();
+
+      if (error) {
+        logger.error('Error upserting open house', {
+          OpenHouseKey: openHouseData.OpenHouseKey,
+          ListingKey: openHouseData.ListingKey,
+          error: error.message
+        });
+        throw error;
+      }
+
+      logger.debug('Open house upserted successfully', {
+        OpenHouseKey: openHouseData.OpenHouseKey,
+        ListingKey: openHouseData.ListingKey
+      });
+
+      return { success: true, data };
+
+    } catch (error) {
+      logger.error('Database error upserting open house', {
+        OpenHouseKey: openHouseData?.OpenHouseKey,
+        ListingKey: openHouseData?.ListingKey,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Upsert multiple open house records
+   * @param {Array} openHousesData - Array of mapped open house data
+   * @param {number} batchSize - Size of batches for processing
+   * @returns {Promise<Object>} Result summary
+   */
+  async upsertOpenHouses(openHousesData, batchSize = 100) {
+    try {
+      logger.info(`Starting bulk upsert of ${openHousesData.length} open houses`);
+      
+      const results = {
+        total: openHousesData.length,
+        successful: 0,
+        failed: 0,
+        errors: []
+      };
+
+      // Process in batches
+      for (let i = 0; i < openHousesData.length; i += batchSize) {
+        const batch = openHousesData.slice(i, i + batchSize);
+        
+        try {
+          const { data, error } = await this.client
+            .from('OpenHouse')
+            .upsert(batch, {
+              onConflict: 'OpenHouseKey',
+              ignoreDuplicates: false
+            })
+            .select('OpenHouseKey');
+
+          if (error) {
+            logger.error(`Error upserting open houses batch ${i}-${i + batch.length}`, {
+              error: error.message
+            });
+            results.failed += batch.length;
+            results.errors.push({
+              batch: `${i}-${i + batch.length}`,
+              error: error.message
+            });
+          } else {
+            results.successful += data.length;
+            logger.info(`Open houses batch ${i}-${i + batch.length} upserted successfully`);
+          }
+
+        } catch (batchError) {
+          logger.error(`Database error in open houses batch ${i}-${i + batch.length}`, {
+            error: batchError.message
+          });
+          results.failed += batch.length;
+          results.errors.push({
+            batch: `${i}-${i + batch.length}`,
+            error: batchError.message
+          });
+        }
+      }
+
+      logger.info('Bulk open houses upsert completed', results);
+      return results;
+
+    } catch (error) {
+      logger.error('Error in bulk open houses upsert', { error: error.message });
+      throw error;
+    }
   }
 
   /**

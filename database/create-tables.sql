@@ -96,25 +96,8 @@ CREATE TABLE IF NOT EXISTS "Property" (
     "ParkingSpaces" INTEGER,
     "ParkingTotal" INTEGER,
     
-    -- Open house fields
-    "OpenHouseDate" DATE,
-    "OpenHouseStartTime" TIME,
-    "OpenHouseEndTime" TIME,
-    "OpenHouseStatus" TEXT,
-    "OpenHouseDateTime" TIMESTAMPTZ,
-    
-    -- Room details (arrays for flexibility)
-    "RoomKey" TEXT[],
-    "RoomDescription" TEXT,
-    "RoomLength" DECIMAL,
-    "RoomWidth" DECIMAL,
-    "RoomLengthWidthUnits" TEXT,
-    "RoomLevel" TEXT,
-    "RoomType" TEXT,
-    "RoomFeature1" TEXT,
-    "RoomFeature2" TEXT,
-    "RoomFeature3" TEXT,
-    "RoomFeatures" TEXT[],
+    -- Note: OpenHouse and Room data are now stored in separate tables
+    -- (OpenHouse and PropertyRooms) for proper normalization
     
     -- Association fields
     "AssociationAmenities" TEXT[],
@@ -173,6 +156,62 @@ CREATE TABLE IF NOT EXISTS "Media" (
 );
 
 -- =================================
+-- PROPERTY ROOMS TABLE
+-- =================================
+CREATE TABLE IF NOT EXISTS "PropertyRooms" (
+    -- Primary key
+    "RoomKey" TEXT PRIMARY KEY,
+    
+    -- Foreign key to Property table
+    "ListingKey" TEXT NOT NULL, -- Links to Property.ListingKey
+    
+    -- Room details
+    "RoomDescription" TEXT,
+    "RoomLength" DECIMAL,
+    "RoomWidth" DECIMAL,
+    "RoomLengthWidthUnits" TEXT,
+    "RoomLevel" TEXT,
+    "RoomType" TEXT,
+    "RoomFeature1" TEXT,
+    "RoomFeature2" TEXT,
+    "RoomFeature3" TEXT,
+    "RoomFeatures" TEXT[], -- Array field
+    
+    -- Order/sequence information
+    "Order" INTEGER,
+    
+    -- Timestamp fields
+    "ModificationTimestamp" TIMESTAMPTZ,
+    "CreatedAt" TIMESTAMPTZ DEFAULT NOW(),
+    "UpdatedAt" TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =================================
+-- OPEN HOUSE TABLE
+-- =================================
+CREATE TABLE IF NOT EXISTS "OpenHouse" (
+    -- Primary key
+    "OpenHouseKey" TEXT PRIMARY KEY,
+    
+    -- Foreign key to Property table
+    "ListingKey" TEXT NOT NULL, -- Links to Property.ListingKey
+    
+    -- Open house details
+    "OpenHouseDate" DATE,
+    "OpenHouseStartTime" TIME,
+    "OpenHouseEndTime" TIME,
+    "OpenHouseStatus" TEXT,
+    "OpenHouseDateTime" TIMESTAMPTZ,
+    "OpenHouseRemarks" TEXT,
+    "OpenHouseType" TEXT,
+    
+    -- Timestamp fields
+    "ModificationTimestamp" TIMESTAMPTZ,
+    "CreatedAt" TIMESTAMPTZ DEFAULT NOW(),
+    "UpdatedAt" TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =================================
 -- INDEXES FOR PERFORMANCE
 -- =================================
 
@@ -194,6 +233,19 @@ CREATE INDEX IF NOT EXISTS "idx_media_type" ON "Media" ("MediaType");
 CREATE INDEX IF NOT EXISTS "idx_media_preferred" ON "Media" ("PreferredPhotoYN");
 CREATE INDEX IF NOT EXISTS "idx_media_order" ON "Media" ("Order");
 
+-- PropertyRooms indexes
+CREATE INDEX IF NOT EXISTS "idx_property_rooms_listing_key" ON "PropertyRooms" ("ListingKey");
+CREATE INDEX IF NOT EXISTS "idx_property_rooms_modification" ON "PropertyRooms" ("ModificationTimestamp");
+CREATE INDEX IF NOT EXISTS "idx_property_rooms_type" ON "PropertyRooms" ("RoomType");
+CREATE INDEX IF NOT EXISTS "idx_property_rooms_level" ON "PropertyRooms" ("RoomLevel");
+CREATE INDEX IF NOT EXISTS "idx_property_rooms_order" ON "PropertyRooms" ("Order");
+
+-- OpenHouse indexes
+CREATE INDEX IF NOT EXISTS "idx_open_house_listing_key" ON "OpenHouse" ("ListingKey");
+CREATE INDEX IF NOT EXISTS "idx_open_house_modification" ON "OpenHouse" ("ModificationTimestamp");
+CREATE INDEX IF NOT EXISTS "idx_open_house_date" ON "OpenHouse" ("OpenHouseDate");
+CREATE INDEX IF NOT EXISTS "idx_open_house_status" ON "OpenHouse" ("OpenHouseStatus");
+
 -- =================================
 -- FOREIGN KEY RELATIONSHIP
 -- =================================
@@ -202,6 +254,20 @@ CREATE INDEX IF NOT EXISTS "idx_media_order" ON "Media" ("Order");
 ALTER TABLE "Media" 
 ADD CONSTRAINT "fk_media_property" 
 FOREIGN KEY ("ResourceRecordKey") 
+REFERENCES "Property" ("ListingKey") 
+ON DELETE CASCADE;
+
+-- Link PropertyRooms to Property
+ALTER TABLE "PropertyRooms" 
+ADD CONSTRAINT "fk_property_rooms_property" 
+FOREIGN KEY ("ListingKey") 
+REFERENCES "Property" ("ListingKey") 
+ON DELETE CASCADE;
+
+-- Link OpenHouse to Property
+ALTER TABLE "OpenHouse" 
+ADD CONSTRAINT "fk_open_house_property" 
+FOREIGN KEY ("ListingKey") 
 REFERENCES "Property" ("ListingKey") 
 ON DELETE CASCADE;
 
@@ -230,6 +296,18 @@ CREATE TRIGGER update_media_updated_at
     FOR EACH ROW 
     EXECUTE FUNCTION update_updated_at_column();
 
+-- Trigger for PropertyRooms table
+CREATE TRIGGER update_property_rooms_updated_at 
+    BEFORE UPDATE ON "PropertyRooms" 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Trigger for OpenHouse table
+CREATE TRIGGER update_open_house_updated_at 
+    BEFORE UPDATE ON "OpenHouse" 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
 -- =================================
 -- ROW LEVEL SECURITY (OPTIONAL)
 -- =================================
@@ -248,8 +326,14 @@ CREATE TRIGGER update_media_updated_at
 
 COMMENT ON TABLE "Property" IS 'RESO-compliant property data from AMPRE IDX/VOW feeds';
 COMMENT ON TABLE "Media" IS 'Property media (photos, virtual tours) linked to properties';
+COMMENT ON TABLE "PropertyRooms" IS 'Property room details from PropertyRooms endpoint';
+COMMENT ON TABLE "OpenHouse" IS 'Open house information from OpenHouse endpoint';
 
 COMMENT ON COLUMN "Property"."ListingKey" IS 'Unique MLS listing identifier';
 COMMENT ON COLUMN "Property"."ModificationTimestamp" IS 'Used for incremental sync';
 COMMENT ON COLUMN "Media"."ResourceRecordKey" IS 'Links to Property.ListingKey';
 COMMENT ON COLUMN "Media"."MediaModificationTimestamp" IS 'Used for incremental media sync';
+COMMENT ON COLUMN "PropertyRooms"."RoomKey" IS 'Unique room identifier';
+COMMENT ON COLUMN "PropertyRooms"."ListingKey" IS 'Links to Property.ListingKey';
+COMMENT ON COLUMN "OpenHouse"."OpenHouseKey" IS 'Unique open house identifier';
+COMMENT ON COLUMN "OpenHouse"."ListingKey" IS 'Links to Property.ListingKey';

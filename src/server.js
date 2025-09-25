@@ -32,7 +32,7 @@ if (missingEnvVars.length > 0) {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Import routes after environment validation
 const { default: propertyRoutes } = await import('./routes/propertyRoutes.js');

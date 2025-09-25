@@ -25,11 +25,30 @@ class AmpreApiService {
       media: process.env.MEDIA_URL
     };
 
+    // Enhanced retry and rate limiting configuration
+    this.retryConfig = {
+      maxRetries: 5,
+      baseDelay: 1000, // 1 second
+      maxDelay: 30000, // 30 seconds
+      backoffMultiplier: 2
+    };
+
+    // Rate limiting configuration
+    this.rateLimitConfig = {
+      requestsPerMinute: 30, // Conservative rate limit
+      requestsPerHour: 1000
+    };
+
+    // Track request timing for rate limiting
+    this.requestTimestamps = [];
+
     logger.info('AMPRE API Service initialized', { 
       baseUrl: this.baseUrl,
       hasIdxToken: !!this.idxToken,
       hasVowToken: !!this.vowToken,
-      endpoints: Object.keys(this.endpoints).filter(key => this.endpoints[key])
+      endpoints: Object.keys(this.endpoints).filter(key => this.endpoints[key]),
+      retryConfig: this.retryConfig,
+      rateLimitConfig: this.rateLimitConfig
     });
   }
 
@@ -57,8 +76,113 @@ class AmpreApiService {
 
     return {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'User-Agent': 'Brampton-RealEstate-Sync/1.0',
+      'Accept': 'application/json'
     };
+  }
+
+  /**
+   * Rate limiting check and enforcement
+   * @returns {Promise<void>} Resolves when it's safe to make a request
+   */
+  async enforceRateLimit() {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+    const oneHourAgo = now - 3600000;
+
+    // Clean up old timestamps
+    this.requestTimestamps = this.requestTimestamps.filter(timestamp => timestamp > oneHourAgo);
+
+    // Check minute limit
+    const requestsInLastMinute = this.requestTimestamps.filter(timestamp => timestamp > oneMinuteAgo).length;
+    if (requestsInLastMinute >= this.rateLimitConfig.requestsPerMinute) {
+      const waitTime = 60000 - (now - this.requestTimestamps[this.requestTimestamps.length - this.rateLimitConfig.requestsPerMinute]);
+      logger.info(`Rate limit reached, waiting ${Math.ceil(waitTime / 1000)} seconds`);
+      await this.sleep(waitTime);
+    }
+
+    // Check hour limit
+    const requestsInLastHour = this.requestTimestamps.length;
+    if (requestsInLastHour >= this.rateLimitConfig.requestsPerHour) {
+      const oldestRequest = Math.min(...this.requestTimestamps);
+      const waitTime = 3600000 - (now - oldestRequest);
+      logger.info(`Hourly rate limit reached, waiting ${Math.ceil(waitTime / 1000)} seconds`);
+      await this.sleep(waitTime);
+    }
+
+    // Record this request
+    this.requestTimestamps.push(now);
+  }
+
+  /**
+   * Sleep utility function
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise<void>}
+   */
+  async sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Execute a request with retry logic and rate limiting
+   * @param {string} url - Request URL
+   * @param {Object} options - Fetch options
+   * @param {string} operation - Operation description for logging
+   * @returns {Promise<Response>} Fetch response
+   */
+  async executeWithRetry(url, options, operation = 'API request') {
+    await this.enforceRateLimit();
+
+    let lastError;
+    for (let attempt = 1; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        logger.debug(`${operation} - Attempt ${attempt}/${this.retryConfig.maxRetries}`, { url });
+        
+        const response = await fetch(url, options);
+        
+        if (response.ok) {
+          if (attempt > 1) {
+            logger.info(`${operation} succeeded on attempt ${attempt}`);
+          }
+          return response;
+        }
+
+        // Check for Cloudflare blocking or rate limiting
+        if (response.status === 429 || response.status === 403) {
+          const errorText = await response.text().catch(() => 'Unknown error');
+          
+          if (errorText.includes('Cloudflare') || errorText.includes('blocked')) {
+            logger.warn(`${operation} - Cloudflare blocking detected (attempt ${attempt})`);
+            lastError = new Error(`Cloudflare blocking: ${response.status} ${response.statusText}`);
+          } else {
+            logger.warn(`${operation} - Rate limited (attempt ${attempt})`);
+            lastError = new Error(`Rate limited: ${response.status} ${response.statusText}`);
+          }
+        } else {
+          logger.warn(`${operation} - HTTP ${response.status} (attempt ${attempt})`);
+          lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+      } catch (error) {
+        logger.warn(`${operation} - Network error (attempt ${attempt})`, { error: error.message });
+        lastError = error;
+      }
+
+      // Calculate delay for next attempt
+      if (attempt < this.retryConfig.maxRetries) {
+        const delay = Math.min(
+          this.retryConfig.baseDelay * Math.pow(this.retryConfig.backoffMultiplier, attempt - 1),
+          this.retryConfig.maxDelay
+        );
+        
+        logger.info(`${operation} - Waiting ${delay}ms before retry`);
+        await this.sleep(delay);
+      }
+    }
+
+    logger.error(`${operation} failed after ${this.retryConfig.maxRetries} attempts`);
+    throw lastError;
   }
 
   /**
@@ -70,6 +194,12 @@ class AmpreApiService {
    */
   async getCount(endpoint, filter = '', feedType = 'default') {
     try {
+      // Security: PropertyRooms should always use IDX feed type
+      if (endpoint === 'PropertyRooms' && feedType !== 'idx') {
+        logger.warn(`PropertyRooms count forced to use IDX feed type (was: ${feedType})`);
+        feedType = 'idx';
+      }
+
       // Manually construct URL to avoid URLSearchParams encoding issues
       let urlString = `${this.baseUrl}/odata/${endpoint}?$top=0&$count=true`;
       
@@ -82,7 +212,7 @@ class AmpreApiService {
       logger.debug('Fetching count', { url: urlString, feedType });
       
       const headers = this.getHeaders(feedType);
-      const response = await fetch(urlString, { headers });
+      const response = await this.executeWithRetry(urlString, { headers }, `Get count for ${endpoint}`);
       
       if (!response.ok) {
         let errorBody = '';
@@ -132,6 +262,12 @@ class AmpreApiService {
       select = '',
       feedType = 'idx'
     } = options;
+
+    // Security: PropertyRooms should always use IDX feed type
+    if (endpoint === 'PropertyRooms' && feedType !== 'idx') {
+      logger.warn(`PropertyRooms endpoint forced to use IDX feed type (was: ${feedType})`);
+      feedType = 'idx';
+    }
     
     try {
       // Manually construct URL to avoid URLSearchParams encoding issues
@@ -165,7 +301,7 @@ class AmpreApiService {
       });
       
       const headers = this.getHeaders(feedType);
-      const response = await fetch(urlString, { headers });
+      const response = await this.executeWithRetry(urlString, { headers }, `Fetch batch for ${endpoint}`);
       
       if (!response.ok) {
         let errorBody = '';
@@ -349,7 +485,7 @@ class AmpreApiService {
     try {
       logger.info('Fetching VOW properties (sold/off-market listings)');
       
-      const defaultFilter = "ContractStatus ne 'Available' and ModificationTimestamp ge 2025-01-01T00:00:00Z";
+      const defaultFilter = "ContractStatus ne 'Available' and PropertyType ne 'Commercial'";
       
       return await this.fetchBatch('Property', {
         ...options,
@@ -364,19 +500,28 @@ class AmpreApiService {
   }
 
   /**
-   * Fetch property rooms data
+   * Fetch property rooms data (IDX ONLY - Available Properties)
    * @param {Object} options - Query options
-   * @returns {Promise<Array>} Array of property room records
+   * @returns {Promise<Array>} Array of property room records for IDX properties only
    */
   async fetchPropertyRooms(options = {}) {
     try {
-      logger.info('Fetching property rooms data');
+      logger.info('Fetching property rooms data (IDX properties only)');
       
-      return await this.fetchBatch('PropertyRooms', {
+      // Force IDX feed type for rooms - rooms should only be fetched for available properties
+      const roomOptions = {
         ...options,
         orderBy: options.orderBy || 'ModificationTimestamp desc',
-        feedType: 'idx' // Use IDX token for property rooms
-      });
+        feedType: 'idx' // Always use IDX token for property rooms
+      };
+      
+      // Override any feedType that might have been passed in options
+      if (options.feedType && options.feedType !== 'idx') {
+        logger.warn(`Property rooms fetch forced to IDX feed type (was: ${options.feedType})`);
+        roomOptions.feedType = 'idx';
+      }
+      
+      return await this.fetchBatch('PropertyRooms', roomOptions);
       
     } catch (error) {
       logger.error('Error fetching property rooms', { error: error.message });

@@ -7,9 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "sync": "node src/scripts/sync-feeds.js",
-    "backfill": "node run-backfill.js",
-    "backfill-direct": "node src/scripts/backfill-sync.js",
+    "sync": "node src/scripts/sync.js",
+    "sync-scheduled": "node src/scripts/sync-feeds.js",
     "setup": "node src/scripts/setup.js",
     "test-api": "node src/scripts/test-api.js",
     "test": "jest",

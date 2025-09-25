@@ -14,11 +14,11 @@ export const config = {
       access: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ2ZW5kb3IvdHJyZWIvNjI4OSIsImF1ZCI6IkFtcFVzZXJzUHJkIiwicm9sZXMiOlsiQW1wVmVuZG9yIl0sImlzcyI6InByb2QuYW1wcmUuY2EiLCJleHAiOjI1MzQwMjMwMDc5OSwiaWF0IjoxNzU4NzMzOTQ2LCJzdWJqZWN0VHlwZSI6InZlbmRvciIsInN1YmplY3RLZXkiOiI2Mjg5IiwianRpIjoiNGM0NmIyOTgxNjhhODQ5YiIsImN1c3RvbWVyTmFtZSI6InRycmViIn0.AXTWrd_GMd19uiisBbW8IoFxqKzcEZrTSErSnT0qzkY'
     },
     endpoints: {
-      idxProperties: "https://query.ampre.ca/odata/Property?$filter=ContractStatus%20eq%20'Available'&$orderby=ModificationTimestamp%20desc",
-      vowProperties: "https://query.ampre.ca/odata/Property?$filter=ContractStatus%20ne%20'Available'%20and%20ModificationTimestamp%20ge%202025-01-01T00:00:00Z&$orderby=ModificationTimestamp%20desc",
+      idxProperties: "https://query.ampre.ca/odata/Property?$filter=ContractStatus%20eq%20'Available'%20and%20PropertyType%20ne%20'Commercial'&$orderby=ModificationTimestamp%20desc",
+      vowProperties: "https://query.ampre.ca/odata/Property?$filter=ContractStatus%20ne%20'Available'%20and%20PropertyType%20ne%20'Commercial'%20and%20ModificationTimestamp%20ge%202023-01-01T00:00:00Z&$orderby=ModificationTimestamp%20desc",
       propertyRooms: 'https://query.ampre.ca/odata/PropertyRooms?$orderby=ModificationTimestamp desc',
       openHouse: 'https://query.ampre.ca/odata/OpenHouse?$orderby=OpenHouseDate desc',
-      media: 'https://query.ampre.ca/odata/Media?$filter=MediaModificationTimestamp%20ge%202025-01-01T00:00:00Z&$orderby=MediaModificationTimestamp%20desc'
+      media: 'https://query.ampre.ca/odata/Media?$filter=ClassName%20ne%20%27Commercial%27&$orderby=MediaModificationTimestamp%20desc'
     }
   },
 
@@ -31,7 +31,7 @@ export const config = {
 
   // Application Configuration
   app: {
-    port: 3000,
+    port: 3001,
     nodeEnv: 'development',
     syncIntervalMinutes: 30,
     batchSizeProperty: 1000,
