@@ -253,8 +253,8 @@ class EnhancedSyncService {
     };
 
     try {
-      // Get total count first
-      const totalCount = await this.ampreApi.getCount('Media', this.config.media.filter || '');
+      // Get total count first using IDX feed type (same as batch fetching)
+      const totalCount = await this.ampreApi.getCount('Media', this.config.media.filter || '', 'idx');
       console.log(`📈 Total media records available: ${totalCount.toLocaleString()}`);
       console.log(`🔄 Will process in batches of ${this.config.media.batchSize.toLocaleString()}\n`);
 
