@@ -234,9 +234,22 @@ class EnhancedSyncService {
   }
 
   /**
-   * Enhanced media sync with 5000-record batching
+   * Enhanced media sync with timestamp-based pagination (bypasses 100K limit)
    */
   async syncMediaInBatches(options = {}) {
+    const useTimestampPagination = options.useTimestampPagination !== false; // Default to true
+    
+    if (useTimestampPagination) {
+      return this.syncMediaWithTimestampPagination(options);
+    } else {
+      return this.syncMediaWithSkipPagination(options);
+    }
+  }
+
+  /**
+   * Media sync with skip-based pagination (original method, limited to 100K records)
+   */
+  async syncMediaWithSkipPagination(options = {}) {
     const startTime = Date.now();
     console.log('\n📸 ===== ENHANCED MEDIA SYNC STARTED =====');
     console.log(`📊 Batch Size: ${this.config.media.batchSize} records`);
@@ -355,6 +368,206 @@ class EnhancedSyncService {
       logger.error('Enhanced media sync failed', { error: error.message, stats });
       throw error;
     }
+  }
+
+  /**
+   * Media sync with timestamp-based pagination (bypasses 100K limit)
+   */
+  async syncMediaWithTimestampPagination(options = {}) {
+    const startTime = Date.now();
+    console.log('\n📸 ===== ENHANCED MEDIA SYNC (TIMESTAMP-BASED) STARTED =====');
+    console.log(`📊 Batch Size: ${this.config.media.batchSize} records`);
+    console.log(`💾 Database Batch Size: ${this.config.media.dbBatchSize} records`);
+    console.log(`⏰ Started at: ${new Date().toISOString()}\n`);
+
+    const stats = {
+      totalFetched: 0,
+      totalProcessed: 0,
+      successful: 0,
+      failed: 0,
+      errors: [],
+      timeRanges: 0
+    };
+
+    try {
+      // Get total count first using IDX feed type (same as batch fetching)
+      const totalCount = await this.ampreApi.getCount('Media', this.config.media.filter || '', 'idx');
+      console.log(`📈 Total media records available: ${totalCount.toLocaleString()}`);
+      console.log(`🔄 Will process using timestamp-based pagination\n`);
+
+      // Define time ranges to process (monthly chunks from 2025)
+      const timeRanges = this.generateTimeRanges();
+      console.log(`📅 Processing ${timeRanges.length} time ranges`);
+
+      for (let i = 0; i < timeRanges.length; i++) {
+        const range = timeRanges[i];
+        console.log(`\n📦 ===== TIME RANGE ${i + 1}/${timeRanges.length} =====`);
+        console.log(`📅 ${range.start} to ${range.end}`);
+
+        try {
+          const rangeResult = await this.processTimeRange(range, i + 1);
+          
+          stats.totalFetched += rangeResult.totalFetched;
+          stats.totalProcessed += rangeResult.totalProcessed;
+          stats.successful += rangeResult.successful;
+          stats.failed += rangeResult.failed;
+          stats.errors.push(...rangeResult.errors);
+          stats.timeRanges++;
+
+          const progress = Math.round(((i + 1) / timeRanges.length) * 100);
+          console.log(`🎯 Overall Progress: ${i + 1}/${timeRanges.length} time ranges (${progress}%)`);
+
+        } catch (rangeError) {
+          console.error(`❌ Time range ${i + 1} failed: ${rangeError.message}`);
+          stats.errors.push({
+            timeRange: i + 1,
+            range: range,
+            error: rangeError.message
+          });
+        }
+      }
+
+      // Final summary
+      const totalDuration = Date.now() - startTime;
+      const avgRecordsPerSecond = Math.round(stats.totalProcessed / (totalDuration / 1000));
+      
+      console.log('\n🎉 ===== MEDIA SYNC COMPLETED =====');
+      console.log(`⏰ Total Duration: ${Math.round(totalDuration / 1000)}s (${Math.round(totalDuration / 60000)}m)`);
+      console.log(`📊 Total Time Ranges: ${stats.timeRanges}`);
+      console.log(`📥 Total Fetched: ${stats.totalFetched.toLocaleString()}`);
+      console.log(`✅ Successful: ${stats.successful.toLocaleString()}`);
+      console.log(`❌ Failed: ${stats.failed.toLocaleString()}`);
+      console.log(`📈 Success Rate: ${Math.round((stats.successful / stats.totalProcessed) * 100)}%`);
+      console.log(`⚡ Average Speed: ${avgRecordsPerSecond} records/sec`);
+      
+      if (stats.errors.length > 0) {
+        console.log(`\n⚠️  ${stats.errors.length} errors occurred (check logs for details)`);
+      }
+
+      return stats;
+
+    } catch (error) {
+      console.error(`❌ Media sync failed: ${error.message}`);
+      logger.error('Enhanced media sync failed', { error: error.message, stats });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate time ranges for timestamp-based pagination
+   */
+  generateTimeRanges() {
+    const ranges = [];
+    const now = new Date();
+    const startDate = new Date('2025-01-01T00:00:00Z');
+    
+    // Create monthly ranges from 2025-01-01 to now
+    let currentDate = new Date(startDate);
+    
+    while (currentDate < now) {
+      const rangeStart = new Date(currentDate);
+      
+      // Move to next month
+      currentDate.setMonth(currentDate.getMonth() + 1);
+      const rangeEnd = currentDate > now ? new Date(now) : new Date(currentDate);
+      
+      ranges.push({
+        start: rangeStart.toISOString(),
+        end: rangeEnd.toISOString()
+      });
+    }
+    
+    return ranges;
+  }
+
+  /**
+   * Process a single time range using skip-based pagination within the range
+   */
+  async processTimeRange(range, rangeNumber) {
+    const rangeStats = {
+      totalFetched: 0,
+      totalProcessed: 0,
+      successful: 0,
+      failed: 0,
+      errors: []
+    };
+
+    // Build filter for this time range
+    const timeFilter = `MediaModificationTimestamp ge ${range.start} and MediaModificationTimestamp lt ${range.end}`;
+    
+    try {
+      // Get count for this time range
+      const rangeCount = await this.ampreApi.getCount('Media', timeFilter, 'idx');
+      console.log(`📊 Records in range: ${rangeCount.toLocaleString()}`);
+
+      if (rangeCount === 0) {
+        console.log('⏭️  No records in this time range, skipping');
+        return rangeStats;
+      }
+
+      // Process this range in batches (skip-based, but within 100K limit per range)
+      let skip = 0;
+      let hasMore = true;
+      let batchInRange = 0;
+
+      while (hasMore && skip < 100000) { // Limit to 100K per range
+        batchInRange++;
+        console.log(`\n  📦 Range ${rangeNumber} - Batch ${batchInRange}`);
+        console.log(`  📥 Fetching records ${skip.toLocaleString()} - ${(skip + this.config.media.batchSize - 1).toLocaleString()}`);
+
+        try {
+          const mediaRecords = await this.ampreApi.fetchBatch('Media', {
+            filter: timeFilter,
+            orderBy: this.config.media.timestampField,
+            top: this.config.media.batchSize,
+            skip,
+            feedType: 'idx'
+          });
+
+          rangeStats.totalFetched += mediaRecords.length;
+
+          if (mediaRecords.length === 0) {
+            console.log('  🏁 No more records in this range');
+            break;
+          }
+
+          // Process the batch
+          const batchResult = await this.processMediaBatch(mediaRecords, `${rangeNumber}-${batchInRange}`);
+          
+          rangeStats.totalProcessed += batchResult.processed;
+          rangeStats.successful += batchResult.successful;
+          rangeStats.failed += batchResult.failed;
+          rangeStats.errors.push(...batchResult.errors);
+
+          console.log(`  ✅ Batch ${batchInRange}: ${batchResult.successful}/${batchResult.processed} successful`);
+
+          skip += this.config.media.batchSize;
+          hasMore = mediaRecords.length === this.config.media.batchSize && skip < rangeCount;
+
+        } catch (batchError) {
+          console.error(`  ❌ Batch ${batchInRange} failed: ${batchError.message}`);
+          rangeStats.failed += this.config.media.batchSize;
+          rangeStats.errors.push({
+            range: rangeNumber,
+            batch: batchInRange,
+            error: batchError.message
+          });
+          
+          skip += this.config.media.batchSize;
+          hasMore = skip < rangeCount && skip < 100000;
+        }
+      }
+
+      if (skip >= 100000 && hasMore) {
+        console.log(`  ⚠️  Hit 100K limit for this range, some records may be skipped`);
+      }
+
+    } catch (error) {
+      console.error(`❌ Failed to process time range: ${error.message}`);
+      throw error;
+    }
+
+    return rangeStats;
   }
 
   /**
