@@ -1,10 +1,11 @@
 import logger from '../src/utils/logger.js';
+import columnValidator from '../src/utils/columnValidator.js';
 
-function mapMedia(rawMedia) {
+async function mapMedia(rawMedia) {
   try {
     // Map RESO Media fields to our database schema
     // Using exact field names from provided schema
-    return {
+    const mappedMedia = {
       // Primary key components
       ResourceRecordKey: rawMedia.ResourceRecordKey,
       MediaKey: rawMedia.MediaKey,
@@ -32,6 +33,20 @@ function mapMedia(rawMedia) {
       CreatedAt: new Date().toISOString(), // DEFAULT now()
       UpdatedAt: new Date().toISOString()  // DEFAULT now()
     };
+
+    // Filter out non-existent columns gracefully
+    try {
+      const filteredMedia = await columnValidator.filterDataForTable(mappedMedia, 'Media');
+      return filteredMedia;
+    } catch (filterError) {
+      logger.warn('Error filtering media columns, returning original data:', {
+        MediaKey: rawMedia?.MediaKey,
+        ResourceRecordKey: rawMedia?.ResourceRecordKey,
+        error: filterError.message
+      });
+      // Return the original mapped media if column filtering fails
+      return mappedMedia;
+    }
   } catch (error) {
     logger.error('Error mapping media:', {
       MediaKey: rawMedia?.MediaKey,
@@ -47,10 +62,16 @@ function validateMedia(media) {
   const missingFields = requiredFields.filter(field => !media[field]);
   
   if (missingFields.length > 0) {
-    throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
+    return {
+      isValid: false,
+      errors: [`Missing required fields: ${missingFields.join(', ')}`]
+    };
   }
   
-  return true;
+  return {
+    isValid: true,
+    errors: []
+  };
 }
 
 export { mapMedia, validateMedia };

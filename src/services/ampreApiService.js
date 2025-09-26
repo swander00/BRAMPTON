@@ -1,28 +1,32 @@
 import logger from '../utils/logger.js';
+import { 
+  apiUrls, 
+  tokens 
+} from '../config/config.js';
 
 class AmpreApiService {
   constructor() {
-    this.baseUrl = process.env.AMPRE_BASE_URL || 'https://query.ampre.ca';
-    this.idxToken = process.env.IDX_TOKEN;
-    this.vowToken = process.env.VOW_TOKEN;
+    // Load configuration from config.js
+    this.baseUrl = 'https://query.ampre.ca';
+    this.idxToken = tokens.idx;
+    this.vowToken = tokens.vow;
+    this.accessToken = tokens.access;
     
-    // Fallback to old ACCESS_TOKEN for backward compatibility
-    const fallbackToken = process.env.ACCESS_TOKEN;
-    
-    if (!this.idxToken && !this.vowToken && !fallbackToken) {
+    if (!this.idxToken && !this.vowToken && !this.accessToken) {
       logger.error('IDX_TOKEN, VOW_TOKEN, or ACCESS_TOKEN environment variable is required');
       throw new Error('At least one access token (IDX_TOKEN, VOW_TOKEN, or ACCESS_TOKEN) is required');
     }
 
     // Default to IDX token or fallback
-    this.defaultToken = this.idxToken || fallbackToken;
+    this.defaultToken = this.idxToken || this.accessToken;
 
+    // Use complete URLs from config.js
     this.endpoints = {
-      idxProperties: process.env.IDX_PROPERTIES_URL,
-      vowProperties: process.env.VOW_PROPERTIES_URL,
-      propertyRooms: process.env.PROPERTY_ROOMS_URL,
-      openHouse: process.env.OPEN_HOUSE_URL,
-      media: process.env.MEDIA_URL
+      idxProperties: apiUrls.idx,
+      vowProperties: apiUrls.vow,
+      propertyRooms: apiUrls.rooms,
+      openHouse: apiUrls.openHouse,
+      media: apiUrls.media
     };
 
     // Enhanced retry and rate limiting configuration
@@ -33,14 +37,34 @@ class AmpreApiService {
       backoffMultiplier: 2
     };
 
-    // Rate limiting configuration
+    // Rate limiting configuration from config.js
     this.rateLimitConfig = {
-      requestsPerMinute: 30, // Conservative rate limit
-      requestsPerHour: 1000
+      requestsPerMinute: 120, // Default rate limit
+      requestsPerHour: 5000, // Default hourly rate limit
+      // Dynamic rate limiting configuration
+      adaptiveThrottling: true,
+      baseDelay: 500, // Base delay between requests (ms)
+      maxDelay: 5000, // Maximum delay (ms)
+      minDelay: 100, // Minimum delay (ms)
+      backoffMultiplier: 1.5, // Multiplier for delay increase
+      recoveryMultiplier: 0.9 // Multiplier for delay decrease on success
     };
 
     // Track request timing for rate limiting
     this.requestTimestamps = [];
+    
+    // Dynamic rate limiting state
+    this.dynamicRateLimit = {
+      currentDelay: this.rateLimitConfig.baseDelay,
+      consecutiveErrors: 0,
+      consecutiveSuccesses: 0,
+      lastRateLimitHeaders: null,
+      detectedLimits: {
+        requestsPerMinute: null,
+        requestsPerHour: null,
+        retryAfter: null
+      }
+    };
 
     logger.info('AMPRE API Service initialized', { 
       baseUrl: this.baseUrl,
@@ -83,7 +107,7 @@ class AmpreApiService {
   }
 
   /**
-   * Rate limiting check and enforcement
+   * Rate limiting check and enforcement with dynamic adaptation
    * @returns {Promise<void>} Resolves when it's safe to make a request
    */
   async enforceRateLimit() {
@@ -94,25 +118,142 @@ class AmpreApiService {
     // Clean up old timestamps
     this.requestTimestamps = this.requestTimestamps.filter(timestamp => timestamp > oneHourAgo);
 
+    // Use detected limits if available, otherwise fall back to configured limits
+    const effectiveMinuteLimit = this.dynamicRateLimit.detectedLimits.requestsPerMinute || this.rateLimitConfig.requestsPerMinute;
+    const effectiveHourLimit = this.dynamicRateLimit.detectedLimits.requestsPerHour || this.rateLimitConfig.requestsPerHour;
+
     // Check minute limit
     const requestsInLastMinute = this.requestTimestamps.filter(timestamp => timestamp > oneMinuteAgo).length;
-    if (requestsInLastMinute >= this.rateLimitConfig.requestsPerMinute) {
-      const waitTime = 60000 - (now - this.requestTimestamps[this.requestTimestamps.length - this.rateLimitConfig.requestsPerMinute]);
-      logger.info(`Rate limit reached, waiting ${Math.ceil(waitTime / 1000)} seconds`);
+    if (requestsInLastMinute >= effectiveMinuteLimit) {
+      const waitTime = 60000 - (now - this.requestTimestamps[this.requestTimestamps.length - effectiveMinuteLimit]);
+      logger.info(`Rate limit reached (${requestsInLastMinute}/${effectiveMinuteLimit} requests/min), waiting ${Math.ceil(waitTime / 1000)} seconds`);
       await this.sleep(waitTime);
     }
 
     // Check hour limit
     const requestsInLastHour = this.requestTimestamps.length;
-    if (requestsInLastHour >= this.rateLimitConfig.requestsPerHour) {
+    if (requestsInLastHour >= effectiveHourLimit) {
       const oldestRequest = Math.min(...this.requestTimestamps);
       const waitTime = 3600000 - (now - oldestRequest);
-      logger.info(`Hourly rate limit reached, waiting ${Math.ceil(waitTime / 1000)} seconds`);
+      logger.info(`Hourly rate limit reached (${requestsInLastHour}/${effectiveHourLimit} requests/hour), waiting ${Math.ceil(waitTime / 1000)} seconds`);
       await this.sleep(waitTime);
+    }
+
+    // Apply adaptive throttling delay
+    if (this.rateLimitConfig.adaptiveThrottling && this.dynamicRateLimit.currentDelay > 0) {
+      await this.sleep(this.dynamicRateLimit.currentDelay);
     }
 
     // Record this request
     this.requestTimestamps.push(now);
+  }
+
+  /**
+   * Parse rate limit headers from API response
+   * @param {Response} response - HTTP response object
+   */
+  parseRateLimitHeaders(response) {
+    const headers = response.headers;
+    const rateLimitInfo = {
+      limit: headers.get('X-RateLimit-Limit'),
+      remaining: headers.get('X-RateLimit-Remaining'),
+      reset: headers.get('X-RateLimit-Reset'),
+      retryAfter: headers.get('Retry-After'),
+      resetTime: headers.get('X-RateLimit-Reset-Time')
+    };
+
+    // Update detected limits if available
+    if (rateLimitInfo.limit) {
+      this.dynamicRateLimit.detectedLimits.requestsPerMinute = parseInt(rateLimitInfo.limit);
+    }
+    if (rateLimitInfo.retryAfter) {
+      this.dynamicRateLimit.detectedLimits.retryAfter = parseInt(rateLimitInfo.retryAfter);
+    }
+
+    this.dynamicRateLimit.lastRateLimitHeaders = rateLimitInfo;
+    
+    logger.debug('Rate limit headers parsed', rateLimitInfo);
+    return rateLimitInfo;
+  }
+
+  /**
+   * Update dynamic rate limiting based on request success/failure
+   * @param {boolean} success - Whether the request was successful
+   * @param {number} responseTime - Response time in milliseconds
+   */
+  updateDynamicRateLimit(success, responseTime) {
+    if (!this.rateLimitConfig.adaptiveThrottling) return;
+
+    if (success) {
+      this.dynamicRateLimit.consecutiveSuccesses++;
+      this.dynamicRateLimit.consecutiveErrors = 0;
+      
+      // Gradually reduce delay on consecutive successes
+      if (this.dynamicRateLimit.consecutiveSuccesses >= 3) {
+        this.dynamicRateLimit.currentDelay = Math.max(
+          this.rateLimitConfig.minDelay,
+          this.dynamicRateLimit.currentDelay * this.rateLimitConfig.recoveryMultiplier
+        );
+        this.dynamicRateLimit.consecutiveSuccesses = 0;
+        logger.debug(`Reduced dynamic delay to ${this.dynamicRateLimit.currentDelay}ms due to consecutive successes`);
+      }
+      
+      // Increase delay if response time is high
+      if (responseTime > 2000) { // 2 seconds
+        this.dynamicRateLimit.currentDelay = Math.min(
+          this.rateLimitConfig.maxDelay,
+          this.dynamicRateLimit.currentDelay * this.rateLimitConfig.backoffMultiplier
+        );
+        logger.debug(`Increased dynamic delay to ${this.dynamicRateLimit.currentDelay}ms due to slow response (${responseTime}ms)`);
+      }
+    } else {
+      this.dynamicRateLimit.consecutiveErrors++;
+      this.dynamicRateLimit.consecutiveSuccesses = 0;
+      
+      // Increase delay on consecutive errors
+      if (this.dynamicRateLimit.consecutiveErrors >= 2) {
+        this.dynamicRateLimit.currentDelay = Math.min(
+          this.rateLimitConfig.maxDelay,
+          this.dynamicRateLimit.currentDelay * this.rateLimitConfig.backoffMultiplier
+        );
+        logger.warn(`Increased dynamic delay to ${this.dynamicRateLimit.currentDelay}ms due to consecutive errors (${this.dynamicRateLimit.consecutiveErrors})`);
+      }
+    }
+  }
+
+  /**
+   * Get current dynamic rate limiting status
+   * @returns {Object} Current rate limiting status
+   */
+  getDynamicRateLimitStatus() {
+    return {
+      currentDelay: this.dynamicRateLimit.currentDelay,
+      consecutiveErrors: this.dynamicRateLimit.consecutiveErrors,
+      consecutiveSuccesses: this.dynamicRateLimit.consecutiveSuccesses,
+      detectedLimits: { ...this.dynamicRateLimit.detectedLimits },
+      lastHeaders: this.dynamicRateLimit.lastRateLimitHeaders,
+      config: {
+        adaptiveThrottling: this.rateLimitConfig.adaptiveThrottling,
+        baseDelay: this.rateLimitConfig.baseDelay,
+        maxDelay: this.rateLimitConfig.maxDelay,
+        minDelay: this.rateLimitConfig.minDelay
+      }
+    };
+  }
+
+  /**
+   * Reset dynamic rate limiting state
+   */
+  resetDynamicRateLimit() {
+    this.dynamicRateLimit.currentDelay = this.rateLimitConfig.baseDelay;
+    this.dynamicRateLimit.consecutiveErrors = 0;
+    this.dynamicRateLimit.consecutiveSuccesses = 0;
+    this.dynamicRateLimit.detectedLimits = {
+      requestsPerMinute: null,
+      requestsPerHour: null,
+      retryAfter: null
+    };
+    logger.info('Dynamic rate limiting state reset');
   }
 
   /**
@@ -125,7 +266,7 @@ class AmpreApiService {
   }
 
   /**
-   * Execute a request with retry logic and rate limiting
+   * Execute a request with retry logic and dynamic rate limiting
    * @param {string} url - Request URL
    * @param {Object} options - Fetch options
    * @param {string} operation - Operation description for logging
@@ -136,17 +277,29 @@ class AmpreApiService {
 
     let lastError;
     for (let attempt = 1; attempt <= this.retryConfig.maxRetries; attempt++) {
+      const requestStartTime = Date.now();
+      
       try {
         logger.debug(`${operation} - Attempt ${attempt}/${this.retryConfig.maxRetries}`, { url });
         
         const response = await fetch(url, options);
+        const responseTime = Date.now() - requestStartTime;
+        
+        // Parse rate limit headers from response
+        this.parseRateLimitHeaders(response);
         
         if (response.ok) {
+          // Update dynamic rate limiting on success
+          this.updateDynamicRateLimit(true, responseTime);
+          
           if (attempt > 1) {
-            logger.info(`${operation} succeeded on attempt ${attempt}`);
+            logger.info(`${operation} succeeded on attempt ${attempt} (${responseTime}ms)`);
           }
           return response;
         }
+
+        // Update dynamic rate limiting on failure
+        this.updateDynamicRateLimit(false, responseTime);
 
         // Check for Cloudflare blocking or rate limiting
         if (response.status === 429 || response.status === 403) {
@@ -158,6 +311,27 @@ class AmpreApiService {
           } else {
             logger.warn(`${operation} - Rate limited (attempt ${attempt})`);
             lastError = new Error(`Rate limited: ${response.status} ${response.statusText}`);
+            
+            // Check for Retry-After header and adjust delay
+            const retryAfter = response.headers.get('Retry-After');
+            if (retryAfter) {
+              const retryDelay = parseInt(retryAfter) * 1000; // Convert to milliseconds
+              logger.info(`${operation} - Server requested ${retryDelay}ms delay before retry`);
+              this.dynamicRateLimit.currentDelay = Math.max(this.dynamicRateLimit.currentDelay, retryDelay);
+            }
+          }
+        } else if (response.status === 400) {
+          // Special handling for HTTP 400 errors
+          const errorText = await response.text().catch(() => 'Unknown error');
+          logger.warn(`${operation} - HTTP 400 Bad Request (attempt ${attempt})`);
+          logger.warn(`${operation} - Error details: ${errorText}`);
+          
+          // Check if this might be due to skip parameter limits
+          if (url.includes('$skip=') && parseInt(url.match(/\$skip=(\d+)/)?.[1]) > 50000) {
+            logger.warn(`${operation} - Large skip parameter detected - API may have skip limits`);
+            lastError = new Error(`HTTP 400: Large skip parameter not supported (skip > 50,000)`);
+          } else {
+            lastError = new Error(`HTTP 400: ${errorText || response.statusText}`);
           }
         } else {
           logger.warn(`${operation} - HTTP ${response.status} (attempt ${attempt})`);
@@ -165,6 +339,9 @@ class AmpreApiService {
         }
 
       } catch (error) {
+        const responseTime = Date.now() - requestStartTime;
+        this.updateDynamicRateLimit(false, responseTime);
+        
         logger.warn(`${operation} - Network error (attempt ${attempt})`, { error: error.message });
         lastError = error;
       }
@@ -204,9 +381,8 @@ class AmpreApiService {
       let urlString = `${this.baseUrl}/odata/${endpoint}?$top=0&$count=true`;
       
       if (filter) {
-        // Encode spaces as %20 (not +) for OData compatibility
-        const encodedFilter = filter.replace(/ /g, '%20');
-        urlString += `&$filter=${encodedFilter}`;
+        // Use filter as-is without encoding
+        urlString += `&$filter=${filter}`;
       }
       
       logger.debug('Fetching count', { url: urlString, feedType });
@@ -278,15 +454,13 @@ class AmpreApiService {
       }
       
       if (filter) {
-        // Encode spaces as %20 (not +) for OData compatibility
-        const encodedFilter = filter.replace(/ /g, '%20');
-        urlString += `&$filter=${encodedFilter}`;
+        // Use filter as-is without encoding
+        urlString += `&$filter=${filter}`;
       }
       
       if (orderBy) {
-        // Encode spaces as %20 for orderBy as well
-        const encodedOrderBy = orderBy.replace(/ /g, '%20');
-        urlString += `&$orderby=${encodedOrderBy}`;
+        // Use orderBy as-is without encoding
+        urlString += `&$orderby=${orderBy}`;
       }
       
       if (select) {
@@ -464,8 +638,8 @@ class AmpreApiService {
     try {
       logger.info('Fetching IDX properties (available listings)');
       
-      return await this.fetchBatch('Property', {
-        filter: "ContractStatus eq 'Available'",
+      // Use the complete URL from environment.env which includes all filters
+      return await this.fetchFromCompleteUrl('idxProperties', {
         feedType: 'idx',
         ...options
       });
@@ -485,12 +659,10 @@ class AmpreApiService {
     try {
       logger.info('Fetching VOW properties (sold/off-market listings)');
       
-      const defaultFilter = "ContractStatus ne 'Available' and PropertyType ne 'Commercial'";
-      
-      return await this.fetchBatch('Property', {
-        ...options,
-        filter: options.filter || defaultFilter,
-        feedType: 'vow'
+      // Use the complete URL from environment.env which includes all filters
+      return await this.fetchFromCompleteUrl('vowProperties', {
+        feedType: 'vow',
+        ...options
       });
       
     } catch (error) {
@@ -508,20 +680,11 @@ class AmpreApiService {
     try {
       logger.info('Fetching property rooms data (IDX properties only)');
       
-      // Force IDX feed type for rooms - rooms should only be fetched for available properties
-      const roomOptions = {
-        ...options,
-        orderBy: options.orderBy || 'ModificationTimestamp desc',
-        feedType: 'idx' // Always use IDX token for property rooms
-      };
-      
-      // Override any feedType that might have been passed in options
-      if (options.feedType && options.feedType !== 'idx') {
-        logger.warn(`Property rooms fetch forced to IDX feed type (was: ${options.feedType})`);
-        roomOptions.feedType = 'idx';
-      }
-      
-      return await this.fetchBatch('PropertyRooms', roomOptions);
+      // Use the complete URL from environment.env which includes all filters
+      return await this.fetchFromCompleteUrl('propertyRooms', {
+        feedType: 'idx', // Always use IDX token for property rooms
+        ...options
+      });
       
     } catch (error) {
       logger.error('Error fetching property rooms', { error: error.message });
@@ -538,14 +701,134 @@ class AmpreApiService {
     try {
       logger.info('Fetching open house data');
       
-      return await this.fetchBatch('OpenHouse', {
-        ...options,
-        orderBy: options.orderBy || 'OpenHouseDate desc',
-        feedType: 'idx' // Use IDX token for open houses
+      // Use the complete URL from environment.env which includes all filters
+      return await this.fetchFromCompleteUrl('openHouse', {
+        feedType: 'idx', // Use IDX token for open houses
+        ...options
       });
       
     } catch (error) {
       logger.error('Error fetching open houses', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch media data
+   * @param {Object} options - Query options
+   * @returns {Promise<Array>} Array of media records
+   */
+  async fetchMedia(options = {}) {
+    try {
+      logger.info('Fetching media data');
+      
+      // Use the complete URL from environment.env which includes all filters
+      return await this.fetchFromCompleteUrl('media', {
+        feedType: 'idx', // Use IDX token for media
+        ...options
+      });
+      
+    } catch (error) {
+      logger.error('Error fetching media', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch media data with custom filter - OPTIMIZED VERSION
+   * @param {Object} options - Query options with custom filter
+   * @param {string} options.filter - OData filter string
+   * @param {number} options.top - Number of records to fetch
+   * @param {string} options.orderBy - Order by clause
+   * @returns {Promise<Array>} Array of media records
+   */
+  async fetchMediaWithFilter(options = {}) {
+    const {
+      filter = '',
+      top = 1000,
+      orderBy = 'MediaModificationTimestamp asc',
+      feedType = 'idx'
+    } = options;
+
+    try {
+      logger.info('Fetching media data with custom filter', { filter: filter.substring(0, 100) + '...' });
+      
+      // Build URL with custom filter
+      let baseUrl = this.endpoints.media;
+      if (!baseUrl) {
+        throw new Error('Media endpoint URL not configured');
+      }
+
+      // Append filter parameters to the existing URL
+      let fetchUrl = baseUrl;
+      
+      if (filter) {
+        // Check if the base URL already has a filter and combine them
+        if (fetchUrl.includes('$filter=')) {
+          // Find the end of the existing filter and add our filter
+          const filterIndex = fetchUrl.indexOf('$filter=');
+          const nextParamIndex = fetchUrl.indexOf('&', filterIndex + 8);
+          if (nextParamIndex === -1) {
+            // No more parameters after filter
+            fetchUrl += ` and (${filter})`;
+          } else {
+            // Insert our filter before the next parameter
+            const beforeNext = fetchUrl.substring(0, nextParamIndex);
+            const afterNext = fetchUrl.substring(nextParamIndex);
+            fetchUrl = beforeNext + ` and (${filter})` + afterNext;
+          }
+        } else {
+          fetchUrl += `&$filter=${encodeURIComponent(filter)}`;
+        }
+      }
+      
+      if (top) {
+        fetchUrl += `&$top=${top}`;
+      }
+      
+      // Don't add orderBy if the base URL already has one
+      if (orderBy && !fetchUrl.includes('$orderby=')) {
+        fetchUrl += `&$orderby=${encodeURIComponent(orderBy)}`;
+      }
+
+      logger.debug('Fetching media with custom filter', { 
+        url: fetchUrl.substring(0, 200) + '...',
+        urlLength: fetchUrl.length,
+        feedType
+      });
+      
+      // Log the full URL for debugging (truncated)
+      console.log(`🔗 Media Filter URL (${fetchUrl.length} chars): ${fetchUrl.substring(0, 300)}...`);
+      
+      const headers = this.getHeaders(feedType);
+      const response = await this.executeWithRetry(fetchUrl, { headers }, `Fetch media with filter`);
+      
+      if (!response.ok) {
+        let errorBody = '';
+        try {
+          errorBody = await response.text();
+        } catch (e) {
+          errorBody = response.statusText;
+        }
+        throw new Error(`HTTP ${response.status}: ${errorBody}`);
+      }
+      
+      const data = await response.json();
+      const records = data.value || [];
+      
+      logger.info(`Media records fetched with filter`, { 
+        recordCount: records.length,
+        filter: filter.substring(0, 50) + '...',
+        feedType
+      });
+      
+      return records;
+      
+    } catch (error) {
+      logger.error('Error fetching media with filter', { 
+        filter: filter.substring(0, 100) + '...',
+        error: error.message 
+      });
       throw error;
     }
   }
@@ -584,7 +867,7 @@ class AmpreApiService {
         feedType
       });
 
-      // Build incremental filter
+      // Build incremental filter - Use proper OData DateTimeOffset format
       let filter = `${timestampField} gt ${lastTimestamp} or (${timestampField} eq ${lastTimestamp} and ${keyField} gt '${lastKey}')`;
       
       if (additionalFilter) {

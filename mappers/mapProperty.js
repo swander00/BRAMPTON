@@ -1,4 +1,5 @@
 import logger from '../src/utils/logger.js';
+import columnValidator from '../src/utils/columnValidator.js';
 
 /**
  * Convert a value to an array format for database storage
@@ -34,11 +35,11 @@ function toArray(value) {
   return stringValue ? [stringValue] : null;
 }
 
-function mapProperty(rawProperty) {
+async function mapProperty(rawProperty) {
   try {
     // Map RESO fields to our database schema
     // Using exact field names from provided schema
-    return {
+    const mappedProperty = {
       // Primary key
       ListingKey: rawProperty.ListingKey,
       
@@ -128,6 +129,7 @@ function mapProperty(rawProperty) {
       // Note: OpenHouse and Room data are now handled by separate mappers
       // and stored in dedicated tables (OpenHouse and PropertyRooms)
       
+      
       // Association fields
       AssociationAmenities: toArray(rawProperty.AssociationAmenities), // TEXT[]
       Locker: rawProperty.Locker,
@@ -151,6 +153,20 @@ function mapProperty(rawProperty) {
       Furnished: rawProperty.Furnished,
       RentIncludes: toArray(rawProperty.RentIncludes) // TEXT[]
     };
+
+    // Filter out non-existent columns gracefully
+    try {
+      const filteredProperty = await columnValidator.filterDataForTable(mappedProperty, 'Property');
+      return filteredProperty;
+    } catch (filterError) {
+      logger.warn('Error filtering property columns, returning original data:', {
+        ListingKey: rawProperty?.ListingKey,
+        error: filterError.message
+      });
+      // Return the original mapped property if column filtering fails
+      return mappedProperty;
+    }
+    
   } catch (error) {
     logger.error('Error mapping property:', {
       ListingKey: rawProperty?.ListingKey,
@@ -166,10 +182,16 @@ function validateProperty(property) {
   const missingFields = requiredFields.filter(field => !property[field]);
   
   if (missingFields.length > 0) {
-    throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
+    return {
+      isValid: false,
+      errors: [`Missing required fields: ${missingFields.join(', ')}`]
+    };
   }
   
-  return true;
+  return {
+    isValid: true,
+    errors: []
+  };
 }
 
 export { mapProperty, validateProperty };

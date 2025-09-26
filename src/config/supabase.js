@@ -1,11 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
 import logger from '../utils/logger.js';
-import { config } from './credentials.js';
+import { 
+  SUPABASE_URL, 
+  SUPABASE_ANON_KEY, 
+  SUPABASE_SERVICE_ROLE_KEY 
+} from './config.js';
 
 // Create Supabase client for general use (with anon key)
 export const supabase = createClient(
-  config.supabase.url,
-  config.supabase.anonKey,
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
   {
     auth: {
       autoRefreshToken: false,
@@ -16,8 +20,8 @@ export const supabase = createClient(
 
 // Create Supabase admin client for backend operations (with service role key)
 export const supabaseAdmin = createClient(
-  config.supabase.url,
-  config.supabase.serviceRoleKey,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
   {
     auth: {
       autoRefreshToken: false,
@@ -28,7 +32,7 @@ export const supabaseAdmin = createClient(
 
 // Log connection status
 logger.info('Supabase clients initialized', {
-  url: config.supabase.url,
+  url: SUPABASE_URL,
   hasAdminClient: !!supabaseAdmin
 });
 

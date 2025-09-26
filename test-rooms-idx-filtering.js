@@ -6,7 +6,7 @@
  */
 
 import { setProcessEnv } from './src/config/credentials.js';
-import EnhancedSyncService from './src/services/enhancedSyncService.js';
+import SyncService from './src/services/syncService.js';
 import logger from './src/utils/logger.js';
 
 // Load configuration
@@ -17,7 +17,7 @@ async function testRoomsIdxFiltering() {
   console.log('━'.repeat(60));
   
   try {
-    const syncService = new EnhancedSyncService();
+    const syncService = new SyncService();
     
     // Test 1: Verify room fetching uses IDX feed type
     console.log('\n📋 Test 1: Verify room fetching uses IDX feed type');

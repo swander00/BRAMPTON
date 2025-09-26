@@ -1,13 +1,34 @@
 import logger from '../src/utils/logger.js';
+import columnValidator from '../src/utils/columnValidator.js';
+
+/**
+ * Convert ISO datetime string to time format (HH:MM:SS)
+ * @param {string} dateTimeString - ISO datetime string
+ * @returns {string|null} Time in HH:MM:SS format or null if invalid
+ */
+function convertToTime(dateTimeString) {
+  if (!dateTimeString) return null;
+  
+  try {
+    const date = new Date(dateTimeString);
+    if (isNaN(date.getTime())) return null;
+    
+    // Extract time portion in HH:MM:SS format
+    return date.toTimeString().split(' ')[0];
+  } catch (error) {
+    logger.warn('Failed to convert datetime to time:', { dateTimeString, error: error.message });
+    return null;
+  }
+}
 
 /**
  * Map OpenHouse data to database schema
  * @param {Object} rawOpenHouse - Raw open house data from OpenHouse endpoint
  * @returns {Object} Mapped open house data
  */
-function mapOpenHouse(rawOpenHouse) {
+async function mapOpenHouse(rawOpenHouse) {
   try {
-    return {
+    const mappedOpenHouse = {
       // Primary key
       OpenHouseKey: rawOpenHouse.OpenHouseKey,
       
@@ -16,8 +37,8 @@ function mapOpenHouse(rawOpenHouse) {
       
       // Open house details
       OpenHouseDate: rawOpenHouse.OpenHouseDate,
-      OpenHouseStartTime: rawOpenHouse.OpenHouseStartTime,
-      OpenHouseEndTime: rawOpenHouse.OpenHouseEndTime,
+      OpenHouseStartTime: convertToTime(rawOpenHouse.OpenHouseStartTime),
+      OpenHouseEndTime: convertToTime(rawOpenHouse.OpenHouseEndTime),
       OpenHouseStatus: rawOpenHouse.OpenHouseStatus,
       OpenHouseDateTime: rawOpenHouse.OpenHouseDateTime,
       OpenHouseRemarks: rawOpenHouse.OpenHouseRemarks,
@@ -28,6 +49,20 @@ function mapOpenHouse(rawOpenHouse) {
       CreatedAt: new Date().toISOString(), // DEFAULT now()
       UpdatedAt: new Date().toISOString() // DEFAULT now()
     };
+
+    // Filter out non-existent columns gracefully
+    try {
+      const filteredOpenHouse = await columnValidator.filterDataForTable(mappedOpenHouse, 'OpenHouse');
+      return filteredOpenHouse;
+    } catch (filterError) {
+      logger.warn('Error filtering open house columns, returning original data:', {
+        OpenHouseKey: rawOpenHouse?.OpenHouseKey,
+        ListingKey: rawOpenHouse?.ListingKey,
+        error: filterError.message
+      });
+      // Return the original mapped open house if column filtering fails
+      return mappedOpenHouse;
+    }
   } catch (error) {
     logger.error('Error mapping open house:', {
       OpenHouseKey: rawOpenHouse?.OpenHouseKey,
@@ -48,10 +83,16 @@ function validateOpenHouse(openHouse) {
   const missingFields = requiredFields.filter(field => !openHouse[field]);
   
   if (missingFields.length > 0) {
-    throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
+    return {
+      isValid: false,
+      errors: [`Missing required fields: ${missingFields.join(', ')}`]
+    };
   }
   
-  return true;
+  return {
+    isValid: true,
+    errors: []
+  };
 }
 
 export { mapOpenHouse, validateOpenHouse };

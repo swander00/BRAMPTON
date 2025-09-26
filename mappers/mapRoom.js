@@ -1,4 +1,5 @@
 import logger from '../src/utils/logger.js';
+import columnValidator from '../src/utils/columnValidator.js';
 
 /**
  * Convert a value to an array format for database storage
@@ -39,9 +40,9 @@ function toArray(value) {
  * @param {Object} rawRoom - Raw room data from PropertyRooms endpoint
  * @returns {Object} Mapped room data
  */
-function mapRoom(rawRoom) {
+async function mapRoom(rawRoom) {
   try {
-    return {
+    const mappedRoom = {
       // Primary key
       RoomKey: rawRoom.RoomKey,
       
@@ -68,6 +69,20 @@ function mapRoom(rawRoom) {
       CreatedAt: new Date().toISOString(), // DEFAULT now()
       UpdatedAt: new Date().toISOString() // DEFAULT now()
     };
+
+    // Filter out non-existent columns gracefully
+    try {
+      const filteredRoom = await columnValidator.filterDataForTable(mappedRoom, 'PropertyRooms');
+      return filteredRoom;
+    } catch (filterError) {
+      logger.warn('Error filtering room columns, returning original data:', {
+        RoomKey: rawRoom?.RoomKey,
+        ListingKey: rawRoom?.ListingKey,
+        error: filterError.message
+      });
+      // Return the original mapped room if column filtering fails
+      return mappedRoom;
+    }
   } catch (error) {
     logger.error('Error mapping room:', {
       RoomKey: rawRoom?.RoomKey,
@@ -88,10 +103,16 @@ function validateRoom(room) {
   const missingFields = requiredFields.filter(field => !room[field]);
   
   if (missingFields.length > 0) {
-    throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
+    return {
+      isValid: false,
+      errors: [`Missing required fields: ${missingFields.join(', ')}`]
+    };
   }
   
-  return true;
+  return {
+    isValid: true,
+    errors: []
+  };
 }
 
 export { mapRoom, validateRoom };

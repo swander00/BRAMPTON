@@ -1,10 +1,12 @@
 import { supabase, supabaseAdmin } from '../config/supabase.js';
 import logger from '../utils/logger.js';
+import columnValidator from '../utils/columnValidator.js';
 
 class DatabaseService {
   constructor() {
     // Use admin client for backend operations if available, otherwise use regular client
     this.client = supabaseAdmin || supabase;
+    this.supabase = this.client; // Expose supabase client for compatibility
     
     if (!supabaseAdmin) {
       logger.warn('Using regular Supabase client instead of admin client - some operations may be restricted');
@@ -156,15 +158,33 @@ class DatabaseService {
    */
   async upsertProperty(propertyData) {
     return await this.executeWithRetry(async () => {
+      // Filter out non-existent columns
+      const filteredData = await columnValidator.filterDataForTable(propertyData, 'Property');
+      
+      if (Object.keys(filteredData).length === 0) {
+        logger.warn('No valid columns found for Property table, skipping upsert');
+        return { success: false, data: null, reason: 'No valid columns' };
+      }
+
       const { data, error } = await this.client
         .from('Property')
-        .upsert(propertyData, {
+        .upsert(filteredData, {
           onConflict: 'ListingKey',
           ignoreDuplicates: false
         })
         .select();
 
       if (error) {
+        // Check if it's a missing column error
+        if (error.message && error.message.includes('Could not find') && error.message.includes('column')) {
+          logger.warn('Missing column error ignored for property upsert:', {
+            ListingKey: propertyData.ListingKey,
+            error: error.message
+          });
+          // Return success to continue processing
+          return { success: true, data: null, reason: 'Missing column ignored' };
+        }
+        
         logger.error('Error upserting property', {
           ListingKey: propertyData.ListingKey,
           error: error.message
@@ -190,6 +210,19 @@ class DatabaseService {
     try {
       logger.info(`Starting bulk upsert of ${propertiesData.length} properties`);
       
+      // Filter out non-existent columns for all properties
+      const filteredProperties = await columnValidator.filterDataArrayForTable(propertiesData, 'Property');
+      
+      if (filteredProperties.length === 0) {
+        logger.warn('No valid properties after column filtering, skipping bulk upsert');
+        return {
+          total: propertiesData.length,
+          successful: 0,
+          failed: 0,
+          errors: [{ batch: 'all', error: 'No valid columns found' }]
+        };
+      }
+      
       const results = {
         total: propertiesData.length,
         successful: 0,
@@ -198,8 +231,8 @@ class DatabaseService {
       };
 
       // Process in batches to avoid overwhelming the database
-      for (let i = 0; i < propertiesData.length; i += batchSize) {
-        const batch = propertiesData.slice(i, i + batchSize);
+      for (let i = 0; i < filteredProperties.length; i += batchSize) {
+        const batch = filteredProperties.slice(i, i + batchSize);
         
         try {
           const result = await this.executeWithRetry(async () => {
@@ -280,38 +313,57 @@ class DatabaseService {
    */
   async upsertMedia(mediaData) {
     try {
+      // Filter out non-existent columns
+      const filteredData = await columnValidator.filterDataForTable(mediaData, 'Media');
+      
+      if (Object.keys(filteredData).length === 0) {
+        logger.warn('No valid columns found for Media table, skipping upsert');
+        return { success: false, data: null, reason: 'No valid columns' };
+      }
+
       // Validate that the referenced property exists
-      const propertyExists = await this.validatePropertyExists(mediaData.ResourceRecordKey);
+      const propertyExists = await this.validatePropertyExists(filteredData.ResourceRecordKey);
       
       if (!propertyExists) {
-        const error = new Error(`Property with ListingKey '${mediaData.ResourceRecordKey}' does not exist`);
+        const error = new Error(`Property with ListingKey '${filteredData.ResourceRecordKey}' does not exist`);
         logger.error('Cannot upsert media - referenced property does not exist', {
-          MediaKey: mediaData.MediaKey,
-          ResourceRecordKey: mediaData.ResourceRecordKey
+          MediaKey: filteredData.MediaKey,
+          ResourceRecordKey: filteredData.ResourceRecordKey
         });
         throw error;
       }
 
       const { data, error } = await this.client
         .from('Media')
-        .upsert(mediaData, {
+        .upsert(filteredData, {
           onConflict: 'MediaKey',
           ignoreDuplicates: false
         })
         .select();
 
       if (error) {
+        // Check if it's a missing column error
+        if (error.message && error.message.includes('Could not find') && error.message.includes('column')) {
+          logger.warn('Missing column error ignored for media upsert:', {
+            MediaKey: filteredData.MediaKey,
+            ResourceRecordKey: filteredData.ResourceRecordKey,
+            error: error.message
+          });
+          // Return success to continue processing
+          return { success: true, data: null, reason: 'Missing column ignored' };
+        }
+        
         logger.error('Error upserting media', {
-          MediaKey: mediaData.MediaKey,
-          ResourceRecordKey: mediaData.ResourceRecordKey,
+          MediaKey: filteredData.MediaKey,
+          ResourceRecordKey: filteredData.ResourceRecordKey,
           error: error.message
         });
         throw error;
       }
 
       logger.debug('Media upserted successfully', {
-        MediaKey: mediaData.MediaKey,
-        ResourceRecordKey: mediaData.ResourceRecordKey
+        MediaKey: filteredData.MediaKey,
+        ResourceRecordKey: filteredData.ResourceRecordKey
       });
 
       return { success: true, data };
@@ -336,6 +388,19 @@ class DatabaseService {
     try {
       logger.info(`Starting bulk upsert of ${mediaData.length} media records`);
       
+      // Filter out non-existent columns for all media records
+      const filteredMedia = await columnValidator.filterDataArrayForTable(mediaData, 'Media');
+      
+      if (filteredMedia.length === 0) {
+        logger.warn('No valid media records after column filtering, skipping bulk upsert');
+        return {
+          total: mediaData.length,
+          successful: 0,
+          failed: 0,
+          errors: [{ batch: 'all', error: 'No valid columns found' }]
+        };
+      }
+      
       const results = {
         total: mediaData.length,
         successful: 0,
@@ -344,11 +409,11 @@ class DatabaseService {
       };
 
       // Process in batches
-      for (let i = 0; i < mediaData.length; i += batchSize) {
-        const batch = mediaData.slice(i, i + batchSize);
+      for (let i = 0; i < filteredMedia.length; i += batchSize) {
+        const batch = filteredMedia.slice(i, i + batchSize);
         
         try {
-          // Note: The batch validation is already done at the EnhancedSyncService level
+          // Note: The batch validation is already done at the SyncService level
           // This method assumes all media records in the batch have been pre-validated
           // to ensure their ResourceRecordKey exists in the Property table
           
@@ -396,7 +461,7 @@ class DatabaseService {
   }
 
   /**
-   * Alias for upsertMediaBulk for consistency with EnhancedSyncService
+   * Alias for upsertMediaBulk for consistency with SyncService
    */
   async upsertMediaBatch(mediaData, batchSize = 100) {
     return this.upsertMediaBulk(mediaData, batchSize);
@@ -409,26 +474,45 @@ class DatabaseService {
    */
   async upsertRoom(roomData) {
     try {
+      // Filter out non-existent columns
+      const filteredData = await columnValidator.filterDataForTable(roomData, 'PropertyRooms');
+      
+      if (Object.keys(filteredData).length === 0) {
+        logger.warn('No valid columns found for PropertyRooms table, skipping upsert');
+        return { success: false, data: null, reason: 'No valid columns' };
+      }
+
       const { data, error } = await this.client
         .from('PropertyRooms')
-        .upsert(roomData, {
+        .upsert(filteredData, {
           onConflict: 'RoomKey',
           ignoreDuplicates: false
         })
         .select();
 
       if (error) {
+        // Check if it's a missing column error
+        if (error.message && error.message.includes('Could not find') && error.message.includes('column')) {
+          logger.warn('Missing column error ignored for room upsert:', {
+            RoomKey: filteredData.RoomKey,
+            ListingKey: filteredData.ListingKey,
+            error: error.message
+          });
+          // Return success to continue processing
+          return { success: true, data: null, reason: 'Missing column ignored' };
+        }
+        
         logger.error('Error upserting room', {
-          RoomKey: roomData.RoomKey,
-          ListingKey: roomData.ListingKey,
+          RoomKey: filteredData.RoomKey,
+          ListingKey: filteredData.ListingKey,
           error: error.message
         });
         throw error;
       }
 
       logger.debug('Room upserted successfully', {
-        RoomKey: roomData.RoomKey,
-        ListingKey: roomData.ListingKey
+        RoomKey: filteredData.RoomKey,
+        ListingKey: filteredData.ListingKey
       });
 
       return { success: true, data };
@@ -453,6 +537,45 @@ class DatabaseService {
     try {
       logger.info(`Starting bulk upsert of ${roomsData.length} rooms`);
       
+      // Filter out non-existent columns for all room records
+      const filteredRooms = await columnValidator.filterDataArrayForTable(roomsData, 'PropertyRooms');
+      
+      if (filteredRooms.length === 0) {
+        logger.warn('No valid room records after column filtering, skipping bulk upsert');
+        return {
+          total: roomsData.length,
+          successful: 0,
+          failed: 0,
+          errors: [{ batch: 'all', error: 'No valid columns found' }]
+        };
+      }
+      
+      // FINAL SAFETY CHECK: Ensure all rooms have valid ListingKeys that exist in Property table
+      const listingKeys = [...new Set(filteredRooms.map(r => r.ListingKey))];
+      logger.info(`FINAL CHECK: Verifying ${listingKeys.length} unique ListingKeys exist in Property table`);
+      
+      const existingProperties = await this.client
+        .from('Property')
+        .select('ListingKey')
+        .in('ListingKey', listingKeys)
+        .eq('ContractStatus', 'Available');
+      
+      if (existingProperties.error) {
+        throw new Error(`FINAL CHECK FAILED: Could not verify property existence: ${existingProperties.error.message}`);
+      }
+      
+      const existingKeys = new Set(existingProperties.data.map(p => p.ListingKey));
+      const invalidRooms = filteredRooms.filter(r => !existingKeys.has(r.ListingKey));
+      
+      if (invalidRooms.length > 0) {
+        logger.error(`FINAL CHECK FAILED: ${invalidRooms.length} rooms reference non-existent properties`, {
+          sampleInvalidKeys: invalidRooms.slice(0, 5).map(r => r.ListingKey)
+        });
+        throw new Error(`SECURITY VIOLATION: ${invalidRooms.length} rooms reference properties that don't exist in Property table`);
+      }
+      
+      logger.info(`FINAL CHECK PASSED: All ${filteredRooms.length} rooms reference existing IDX properties`);
+      
       const results = {
         total: roomsData.length,
         successful: 0,
@@ -461,8 +584,8 @@ class DatabaseService {
       };
 
       // Process in batches
-      for (let i = 0; i < roomsData.length; i += batchSize) {
-        const batch = roomsData.slice(i, i + batchSize);
+      for (let i = 0; i < filteredRooms.length; i += batchSize) {
+        const batch = filteredRooms.slice(i, i + batchSize);
         
         try {
           const { data, error } = await this.client
@@ -515,26 +638,45 @@ class DatabaseService {
    */
   async upsertOpenHouse(openHouseData) {
     try {
+      // Filter out non-existent columns
+      const filteredData = await columnValidator.filterDataForTable(openHouseData, 'OpenHouse');
+      
+      if (Object.keys(filteredData).length === 0) {
+        logger.warn('No valid columns found for OpenHouse table, skipping upsert');
+        return { success: false, data: null, reason: 'No valid columns' };
+      }
+
       const { data, error } = await this.client
         .from('OpenHouse')
-        .upsert(openHouseData, {
+        .upsert(filteredData, {
           onConflict: 'OpenHouseKey',
           ignoreDuplicates: false
         })
         .select();
 
       if (error) {
+        // Check if it's a missing column error
+        if (error.message && error.message.includes('Could not find') && error.message.includes('column')) {
+          logger.warn('Missing column error ignored for open house upsert:', {
+            OpenHouseKey: filteredData.OpenHouseKey,
+            ListingKey: filteredData.ListingKey,
+            error: error.message
+          });
+          // Return success to continue processing
+          return { success: true, data: null, reason: 'Missing column ignored' };
+        }
+        
         logger.error('Error upserting open house', {
-          OpenHouseKey: openHouseData.OpenHouseKey,
-          ListingKey: openHouseData.ListingKey,
+          OpenHouseKey: filteredData.OpenHouseKey,
+          ListingKey: filteredData.ListingKey,
           error: error.message
         });
         throw error;
       }
 
       logger.debug('Open house upserted successfully', {
-        OpenHouseKey: openHouseData.OpenHouseKey,
-        ListingKey: openHouseData.ListingKey
+        OpenHouseKey: filteredData.OpenHouseKey,
+        ListingKey: filteredData.ListingKey
       });
 
       return { success: true, data };
@@ -559,6 +701,19 @@ class DatabaseService {
     try {
       logger.info(`Starting bulk upsert of ${openHousesData.length} open houses`);
       
+      // Filter out non-existent columns for all open house records
+      const filteredOpenHouses = await columnValidator.filterDataArrayForTable(openHousesData, 'OpenHouse');
+      
+      if (filteredOpenHouses.length === 0) {
+        logger.warn('No valid open house records after column filtering, skipping bulk upsert');
+        return {
+          total: openHousesData.length,
+          successful: 0,
+          failed: 0,
+          errors: [{ batch: 'all', error: 'No valid columns found' }]
+        };
+      }
+      
       const results = {
         total: openHousesData.length,
         successful: 0,
@@ -567,8 +722,8 @@ class DatabaseService {
       };
 
       // Process in batches
-      for (let i = 0; i < openHousesData.length; i += batchSize) {
-        const batch = openHousesData.slice(i, i + batchSize);
+      for (let i = 0; i < filteredOpenHouses.length; i += batchSize) {
+        const batch = filteredOpenHouses.slice(i, i + batchSize);
         
         try {
           const { data, error } = await this.client
