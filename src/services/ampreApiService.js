@@ -735,10 +735,11 @@ class AmpreApiService {
   }
 
   /**
-   * Fetch media data with custom filter - OPTIMIZED VERSION
+   * Fetch media data with custom filter - OPTIMIZED VERSION with PAGINATION SUPPORT
    * @param {Object} options - Query options with custom filter
    * @param {string} options.filter - OData filter string
    * @param {number} options.top - Number of records to fetch
+   * @param {number} options.skip - Number of records to skip (for pagination)
    * @param {string} options.orderBy - Order by clause
    * @returns {Promise<Array>} Array of media records
    */
@@ -746,6 +747,7 @@ class AmpreApiService {
     const {
       filter = '',
       top = 1000,
+      skip = 0,
       orderBy = 'MediaModificationTimestamp asc',
       feedType = 'idx'
     } = options;
@@ -763,19 +765,19 @@ class AmpreApiService {
       let fetchUrl = baseUrl;
       
       if (filter) {
-        // Check if the base URL already has a filter and combine them
+        // Check if the base URL already has a filter and combine them properly
         if (fetchUrl.includes('$filter=')) {
-          // Find the end of the existing filter and add our filter
-          const filterIndex = fetchUrl.indexOf('$filter=');
-          const nextParamIndex = fetchUrl.indexOf('&', filterIndex + 8);
-          if (nextParamIndex === -1) {
-            // No more parameters after filter
-            fetchUrl += ` and (${filter})`;
+          // Extract the existing filter value
+          const filterMatch = fetchUrl.match(/\$filter=([^&]*)/);
+          if (filterMatch) {
+            const existingFilter = decodeURIComponent(filterMatch[1]);
+            const combinedFilter = `${existingFilter} and (${filter})`;
+            
+            // Replace the existing filter with the combined filter
+            fetchUrl = fetchUrl.replace(/\$filter=[^&]*/, `$filter=${encodeURIComponent(combinedFilter)}`);
           } else {
-            // Insert our filter before the next parameter
-            const beforeNext = fetchUrl.substring(0, nextParamIndex);
-            const afterNext = fetchUrl.substring(nextParamIndex);
-            fetchUrl = beforeNext + ` and (${filter})` + afterNext;
+            // Fallback: append as new filter parameter
+            fetchUrl += `&$filter=${encodeURIComponent(filter)}`;
           }
         } else {
           fetchUrl += `&$filter=${encodeURIComponent(filter)}`;
@@ -784,6 +786,10 @@ class AmpreApiService {
       
       if (top) {
         fetchUrl += `&$top=${top}`;
+      }
+      
+      if (skip > 0) {
+        fetchUrl += `&$skip=${skip}`;
       }
       
       // Don't add orderBy if the base URL already has one

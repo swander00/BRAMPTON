@@ -321,7 +321,9 @@ class SyncService {
       console.log(`🔍 Fetching media for ${propertyKeysArray.length} specific properties`);
       
       // Process properties in batches to avoid URL length limits
-      const propertyBatchSize = 10; // Process only 10 properties at a time to avoid URL length limits
+      // Based on testing, batches larger than 20 properties cause HTTP 500 errors due to URL length
+      // Each property adds ~30 chars to the URL, so 20 properties = ~600 chars filter + base URL
+      const propertyBatchSize = 20; // Tested batch size that works reliably
       let processedProperties = 0;
       
       for (let i = 0; i < propertyKeysArray.length; i += propertyBatchSize) {
@@ -614,8 +616,8 @@ class SyncService {
   }
 
   /**
-   * Process media for a specific batch of properties - OPTIMIZED VERSION
-   * Fetches media only for the provided property keys
+   * Process media for a specific batch of properties - OPTIMIZED VERSION with PAGINATION
+   * Fetches ALL media for the provided property keys using pagination
    */
   async processMediaBatchForProperties(propertyKeys, batchSize, batchNumber) {
     const config = this.config.media;
@@ -635,27 +637,60 @@ class SyncService {
         .map(key => `ResourceRecordKey eq '${key}'`)
         .join(' or ');
       
-      console.log(`🔄 Batch ${batchNumber}: Fetching Media for ${propertyKeys.length} properties`);
+      console.log(`🔄 Batch ${batchNumber}: Fetching ALL Media for ${propertyKeys.length} properties with pagination`);
       
-      // Fetch media with property-specific filter
-      const response = await this.ampreApi.fetchMediaWithFilter({
-        filter: propertyFilter,
-        top: batchSize,
-        orderBy: 'MediaModificationTimestamp asc'
-      });
+      // Fetch ALL media with pagination to ensure we don't miss any records
+      const allRecords = [];
+      let skip = 0;
+      const pageSize = Math.min(batchSize, 1000); // Use reasonable page size
+      let hasMorePages = true;
+      let pageNumber = 1;
       
-      const records = response || [];
-      stats.fetched = records.length;
+      while (hasMorePages) {
+        console.log(`   📄 Fetching page ${pageNumber} (skip: ${skip}, top: ${pageSize})`);
+        
+        // Fetch media page with property-specific filter
+        const response = await this.ampreApi.fetchMediaWithFilter({
+          filter: propertyFilter,
+          top: pageSize,
+          skip: skip,
+          orderBy: 'MediaModificationTimestamp asc'
+        });
+        
+        const pageRecords = response || [];
+        allRecords.push(...pageRecords);
+        
+        console.log(`   📥 Page ${pageNumber}: ${pageRecords.length} records (total so far: ${allRecords.length})`);
+        
+        // Check if we have more pages
+        hasMorePages = pageRecords.length === pageSize;
+        skip += pageSize;
+        pageNumber++;
+        
+        // Safety break to avoid infinite loops
+        if (pageNumber > 100) {
+          console.log(`   ⚠️  Page limit reached (100 pages), stopping pagination`);
+          break;
+        }
+        
+        // Small delay between pages to be nice to the API
+        if (hasMorePages) {
+          await this.sleep(100);
+        }
+      }
       
-      if (records.length === 0) {
+      console.log(`📊 Batch ${batchNumber}: Total media fetched with pagination: ${allRecords.length} records`);
+      stats.fetched = allRecords.length;
+      
+      if (allRecords.length === 0) {
         console.log(`📭 Batch ${batchNumber}: No media records found for these properties`);
         return stats;
       }
       
-      console.log(`📥 Batch ${batchNumber}: Fetched ${records.length} media records for ${propertyKeys.length} properties`);
+      console.log(`📥 Batch ${batchNumber}: Fetched ${allRecords.length} media records for ${propertyKeys.length} properties`);
       
       // All records should be valid since we filtered at API level
-      const validRecords = records;
+      const validRecords = allRecords;
       stats.skipped = 0; // No skipping needed since we pre-filtered
       
       if (validRecords.length === 0) {
